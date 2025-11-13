@@ -1,67 +1,182 @@
 import os
+import html
+import json
 import datetime as dt
 from dateutil import parser as date_parser
 from datetime import timezone
-
-import html
-import json
 
 import feedparser
 import requests
 from openai import OpenAI
 
+from manage_feeds import load_feeds, add_feed, remove_feed, list_feeds
+
 # ---------- CONFIG ----------
-FEEDS_FILE = "feeds.json"
-
-def load_feeds():
-    try:
-        with open(FEEDS_FILE, "r") as f:
-            feeds = json.load(f)
-            # ensure it's a list of strings
-            return [str(x).strip() for x in feeds if str(x).strip()]
-    except FileNotFoundError:
-        return []
-
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")  # your user chat id
 LAST_RUN_FILE = "last_run.txt"
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-def escape_html(s: str) -> str:
-    return html.escape(s, quote=True)
-
-# ---------- LAST RUN HELPERS ----------
-def get_last_run():
-    """Return last run datetime in UTC; default = now - 7 days."""
-    if not os.path.exists(LAST_RUN_FILE):
-        return dt.datetime.now(timezone.utc) - dt.timedelta(days=1)
-
-    with open(LAST_RUN_FILE, "r") as f:
-        parsed = date_parser.parse(f.read().strip())
-
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-
-    return parsed
+TELEGRAM_SEND_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+TELEGRAM_UPDATES_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
 
 
-def set_last_run():
-    now = dt.datetime.now(timezone.utc).isoformat()
+# ---------- TELEGRAM HELPERS & COMMANDS ----------
+
+def reply(chat_id: int, text: str) -> None:
+    """Send a simple text reply to a Telegram chat."""
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+    }
+    try:
+        requests.post(TELEGRAM_SEND_URL, json=payload, timeout=15)
+    except Exception as e:
+        print(f"Error sending Telegram message: {e}")
+
+
+def handle_bot_commands(message: dict) -> None:
+    """Handle /addfeed, /removefeed, /feedlist commands."""
+    chat_id = message["chat"]["id"]
+    # (optional) only respond to your own chat
+    if TELEGRAM_CHAT_ID and str(chat_id) != str(TELEGRAM_CHAT_ID):
+        return
+
+    text = message.get("text", "") or ""
+    text = text.strip()
+
+    if not text.startswith("/"):
+        # not a command – ignore
+        return
+
+    if text.startswith("/start"):
+        reply(
+            chat_id,
+            "Hi! I can manage your Substack feeds.\n\n"
+            "Commands:\n"
+            "/addfeed <url> – add a new feed\n"
+            "/removefeed <url or index> – remove a feed\n"
+            "/feedlist – list current feeds",
+        )
+        return
+
+    if text.startswith("/feedlist"):
+        feeds = list_feeds()
+        if not feeds:
+            reply(chat_id, "No feeds configured yet. Use /addfeed <url> to add one.")
+            return
+        lines = ["📚 <b>Current feeds</b>:"]
+        for i, url in enumerate(feeds, start=1):
+            lines.append(f"{i}. {url}")
+        reply(chat_id, "\n".join(lines))
+        return
+
+    if text.startswith("/addfeed"):
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            reply(chat_id, "Usage: /addfeed <feed_url>")
+            return
+        url = parts[1].strip()
+        added, msg = add_feed(url)
+        if added:
+            reply(chat_id, f"✅ Added feed:\n{msg}")
+        else:
+            reply(chat_id, f"ℹ️ {msg}")
+        return
+
+    if text.startswith("/removefeed"):
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            reply(chat_id, "Usage: /removefeed <feed_url or index>")
+            return
+        arg = parts[1].strip()
+        removed, msg = remove_feed(arg)
+        if removed:
+            reply(chat_id, f"🗑 Removed feed:\n{msg}")
+        else:
+            reply(chat_id, f"⚠️ {msg}")
+        return
+
+    # Unknown command
+    reply(chat_id, "Unknown command. Try /feedlist, /addfeed, or /removefeed.")
+
+
+def listen_for_commands() -> None:
+    """Poll Telegram for updates and process commands."""
+    try:
+        resp = requests.get(TELEGRAM_UPDATES_URL, timeout=20).json()
+    except Exception as e:
+        print(f"Error fetching Telegram updates: {e}")
+        return
+
+    if not resp.get("ok"):
+        print("Telegram getUpdates not ok:", resp)
+        return
+
+    updates = resp.get("result", [])
+    if not updates:
+        return
+
+    for update in updates:
+        message = update.get("message") or update.get("edited_message")
+        if not message:
+            continue
+        if "text" not in message:
+            continue
+        handle_bot_commands(message)
+
+    # Acknowledge updates so we don't re-process them
+    last_id = updates[-1]["update_id"] + 1
+    try:
+        requests.get(
+            TELEGRAM_UPDATES_URL,
+            params={"offset": last_id},
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
+# ---------- LAST RUN TIMESTAMP ----------
+
+def get_last_run() -> dt.datetime:
+    """Read last run time from file, default to 24h ago."""
+    try:
+        with open(LAST_RUN_FILE, "r") as f:
+            ts = f.read().strip()
+            if not ts:
+                raise ValueError("empty last_run")
+            dt_obj = dt.datetime.fromisoformat(ts)
+    except Exception:
+        # default: 24 hours ago
+        dt_obj = dt.datetime.now(timezone.utc) - dt.timedelta(days=1)
+
+    if dt_obj.tzinfo is None:
+        dt_obj = dt_obj.replace(tzinfo=timezone.utc)
+    return dt_obj
+
+
+def set_last_run() -> None:
+    """Store current time as last run."""
+    now = dt.datetime.now(timezone.utc)
     with open(LAST_RUN_FILE, "w") as f:
-        f.write(now)
+        f.write(now.isoformat())
 
 
 # ---------- FETCH SUBSTACK POSTS ----------
-def fetch_new_entries():
+
+def fetch_new_entries() -> list[dict]:
     cutoff = get_last_run()
-    all_entries = []
+    all_entries: list[dict] = []
 
     feeds = load_feeds()
+    print(f"Using {len(feeds)} feeds")
     for feed_url in feeds:
+        print(f"Fetching feed: {feed_url}")
         parsed = feedparser.parse(feed_url)
 
         for entry in parsed.entries:
@@ -76,119 +191,122 @@ def fetch_new_entries():
             if published.tzinfo is None:
                 published = published.replace(tzinfo=timezone.utc)
 
-            if published > cutoff:
-                content = ""
-                if "content" in entry and entry.content:
-                    content = entry.content[0].get("value", "")
-                summary = getattr(entry, "summary", "")
+            if published <= cutoff:
+                continue
 
-                all_entries.append(
-                    {
-                        "title": entry.title,
-                        "link": entry.link,
-                        "published": published,
-                        "summary": summary,
-                        "content": content,
-                        "source": feed_url,
-                    }
-                )
+            content = ""
+            if "content" in entry and entry.content:
+                content = entry.content[0].get("value", "")
+            summary = getattr(entry, "summary", "")
 
-    # Sort by published time
-    all_entries.sort(key=lambda e: e["published"])
+            all_entries.append(
+                {
+                    "title": entry.title,
+                    "link": entry.link,
+                    "published": published,
+                    "source": feed_url,
+                    "content": content,
+                    "summary": summary,
+                }
+            )
+
+    # newest first
+    all_entries.sort(key=lambda x: x["published"], reverse=True)
     return all_entries
 
 
-# ---------- SUMMARISE ARTICLE (SCQR STYLE) ----------
-def summarise_article(article):
-    text = article["content"] or article["summary"] or ""
-    text = text[:9000]  # safety limit
+# ---------- SUMMARISATION WITH SCQR ----------
 
-    prompt = f"""
-You are summarising a Substack article for a very analytical reader who prefers Barbara Minto's Pyramid Principle and the SCQR (Situation–Complication–Question–Resolution) structure.
+def summarise_article(article: dict) -> str:
+    """Use ChatGPT to summarise one article in SCQR + timeline format."""
+    title = article["title"]
+    link = article["link"]
+    raw = article["content"] or article["summary"] or ""
+    raw = raw[:8000]  # keep prompt manageable
 
-Article title: {article['title']}
-URL: {article['link']}
-Source feed: {article['source']}
+    system_msg = (
+        "You are a research expert creating concise but rich summaries of Substack "
+        "articles for a busy reader. Use Barbara Minto's Pyramid Principle and SCQR "
+        "(Situation, Complication, Question, Resolution). Where relevant, highlight "
+        "historical context and a timeline of key events or milestones."
+        "For upcoming trends, analyse and determine what are the current prevalent issues that need to be resolved for another economic, technological or society boom within that industry or sector."
+        "For any technical jargon, make sure to provide definitions or simple explanations to ensure the reader understands what is being discussed. Every point should have evidence to back it up."
+    )
 
-Article content (may be HTML or partial):
-{text}
+    user_msg = f"""
+Summarise the following article in this structured format:
 
-TASK:
-- Produce a structured summary in this EXACT format (no extra headings, no preamble):
+1. <b>Title</b>: {title}
+2. <b>Situation (S)</b>: 2–3 sentences.
+3. <b>Complication (C)</b>: 2–3 sentences. What tension/problem/shift?
+4. <b>Question (Q)</b>: 1–2 sentences. What question is the article implicitly answering?
+5. <b>Resolution (R)</b>: 3–5 sentences. The core argument, answer, or takeaway.
+6. <b>Discussion / Implications</b>: 3–6 bullet points.
+7. <b>Timeline</b>: bullet list of dated or logical steps if possible.
 
-S: <1–3 sentences describing the current situation / context>
-C: <2–4 sentences explaining the complication, tension, or change>
-Q: <1–2 sentences stating the key question or decision implied by the article>
-R: <2–4 sentences summarising the author's main answer, argument, or recommendations>
+Article link: {link}
 
-Discussion:
-- <bullet 1 with a key insight, nuance, or implication>
-- <bullet 2 ...>
-- <optional bullet 3 ...>
-
-Timeline & Gates:
-- <bullet 1 describing past or present milestone OR a forward-looking checkpoint ("gate")>
-- <bullet 2 ...>
-- <optional bullet 3 ...>
-
-CONSTRAINTS:
-- Break down any complex, technical jargon into simple explanations with the perspective and knowledge of an expert in the field.
-- Use clear, concise language but keep the content substantive (roughly 220–320 words total).
-- Where relevant, briefly introduce historical or background context in S or C.
-- Timeline & Gates should focus on 2–4 concrete milestones (past or future) that matter for the thesis.
-- Do NOT repeat the URL; it's handled outside the summary.
+Article content (HTML, may be truncated):
+\"\"\"{raw}\"\"\"
 """
 
     response = client.chat.completions.create(
         model="gpt-4.1-mini",
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
+        ],
         temperature=0.4,
     )
 
     return response.choices[0].message.content.strip()
 
 
-# ---------- BUILD DIGEST ----------
-def build_daily_digest(entries):
+def build_daily_digest(entries: list[dict]) -> str:
     if not entries:
         return "📚 Substack Daily Digest\n\nNo new articles since last run."
 
-    today = dt.datetime.now().strftime("%Y-%m-%d")
-    text = f"📚 Substack Daily Digest — {today}\n"
+    lines = ["📚 <b>Substack Daily Digest</b>", ""]
 
     for i, article in enumerate(entries, start=1):
-        summary = summarise_article(article)
-        pub_utc = article["published"].strftime("%Y-%m-%d %H:%M UTC")
-
-        title_html = (
-            f'<a href="{escape_html(article["link"])}">'
-            f'Article {i}: {escape_html(article["title"])}'
-            f"</a>"
+        pub_str = article["published"].astimezone(timezone.utc).strftime(
+            "%Y-%m-%d %H:%M UTC"
         )
+        try:
+            summary = summarise_article(article)
+        except Exception as e:
+            summary = f"(Error summarising article: {e})"
 
-        text += (
-            f"\n\n====================\n"
-            f"Article {i} (link: {article['link']}):\n"
+        lines.append(
+            f"\n======================\n"
+            f"<b>Article {i}: <a href=\"{article['link']}\">{article['title']}</a></b>\n"
             f"Source: {article['source']}\n"
-            f"Published: {pub_utc}\n\n"
+            f"Published: {pub_str}\n\n"
             f"{summary}"
         )
 
-    return text
+    return "\n".join(lines)
 
 
-# ---------- SEND TO TELEGRAM ----------
-def send_long_message(text, chunk_size=3500):
+# ---------- SEND TO TELEGRAM (CHUNKED) ----------
+
+def send_long_message(text: str, chunk_size: int = 3500) -> None:
     """Split long digest into multiple Telegram messages."""
     paragraphs = text.split("\n\n")
     current = ""
 
-    def send_chunk(chunk):
+    def send_chunk(chunk: str) -> None:
         if not chunk.strip():
             return
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": chunk, "parse_mode": "HTML",}
-        requests.post(url, json=payload)
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": chunk,
+            "parse_mode": "HTML",
+        }
+        try:
+            requests.post(TELEGRAM_SEND_URL, json=payload, timeout=20)
+        except Exception as e:
+            print(f"Error sending chunk: {e}")
 
     for p in paragraphs:
         if len(current) + len(p) + 2 <= chunk_size:
@@ -202,10 +320,15 @@ def send_long_message(text, chunk_size=3500):
 
 
 # ---------- MAIN ----------
-def main():
+
+def main() -> None:
     if not (OPENAI_API_KEY and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
         raise RuntimeError("Missing environment variables")
 
+    # 1) Process any Telegram commands (feed management)
+    listen_for_commands()
+
+    # 2) Build daily digest and send
     entries = fetch_new_entries()
     digest = build_daily_digest(entries)
     send_long_message(digest)
