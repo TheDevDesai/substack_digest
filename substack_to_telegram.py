@@ -75,6 +75,15 @@ def handle_bot_commands(message: dict) -> None:
         reply(chat_id, "\n".join(lines))
         return
 
+if text.startswith("/dailydigest"):
+    entries = fetch_new_entries()
+    digest = build_daily_digest(entries)
+    reply(chat_id, digest[:3500])  # send first chunk
+    # If digest is long, send rest:
+    if len(digest) > 3500:
+        reply(chat_id, digest[3500:])
+    return
+
     if text.startswith("/addfeed"):
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
@@ -319,16 +328,21 @@ def send_long_message(text: str, chunk_size: int = 3500) -> None:
         send_chunk(current)
 
 
-# ---------- MAIN ----------
+# ----------- MAIN -----------
+import sys
 
-def main() -> None:
-    if not (OPENAI_API_KEY and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
-        raise RuntimeError("Missing environment variables")
+def main():
+    commands_only = "--commands-only" in sys.argv
 
-    # 1) Process any Telegram commands (feed management)
+    # Always check Telegram for commands
     listen_for_commands()
 
-    # 2) Build daily digest and send
+    if commands_only:
+        # Only process /feedlist, /addfeed, /removefeed, /dailydigest
+        print("Processed commands only.")
+        return
+
+    # Daily digest workflow:
     entries = fetch_new_entries()
     digest = build_daily_digest(entries)
     send_long_message(digest)
