@@ -56,6 +56,50 @@ def normalise_feed_url(text):
         text += "feed"
     return text
 
+def list_feeds():
+    """Return the current list of feeds."""
+    return load_feeds()
+
+
+def add_feed(url):
+    """Add a new feed if it doesn't already exist.
+
+    Returns (added: bool, message_or_url: str)
+    """
+    feeds = load_feeds()
+    url = normalise_feed_url(url)
+    if url in feeds:
+        return False, "Feed already present."
+    feeds.append(url)
+    save_feeds(feeds)
+    return True, url
+
+
+def remove_feed(arg):
+    """Remove a feed by URL or by 1-based index.
+
+    Returns (removed: bool, message_or_url: str)
+    """
+    feeds = load_feeds()
+    removed = None
+
+    # Allow numeric index: /removefeed 3
+    if arg.isdigit():
+        idx = int(arg) - 1
+        if 0 <= idx < len(feeds):
+            removed = feeds.pop(idx)
+    else:
+        url = normalise_feed_url(arg)
+        if url in feeds:
+            feeds.remove(url)
+            removed = url
+
+    if removed:
+        save_feeds(feeds)
+        return True, removed
+    else:
+        return False, "Could not find that feed to remove."
+
 
 def handle_command(chat_id, text, feeds):
     text = text.strip()
