@@ -4,21 +4,24 @@ from dateutil import parser as date_parser
 from datetime import timezone
 
 import html
+import json
 
 import feedparser
 import requests
 from openai import OpenAI
 
 # ---------- CONFIG ----------
-SUBSTACK_FEEDS = [
-    "https://digitalnative.tech/feed",                     # Digital Native (Rex Woodbury)
-    "https://riskpremiumresearch.substack.com/feed",       # Risk Premium: Research
-    "https://riskpremium.substack.com/feed",               # Risk Premium
-    "https://www.forkable.io/feed",                        # {forkable}
-    "https://www.notboring.co/feed",                       # Not Boring
-    "https://accessiblearthistory.substack.com/feed",      # Accessible Art History
-    "https://a16z.substack.com/feed",                      # a16z
-]
+FEEDS_FILE = "feeds.json"
+
+def load_feeds():
+    try:
+        with open(FEEDS_FILE, "r") as f:
+            feeds = json.load(f)
+            # ensure it's a list of strings
+            return [str(x).strip() for x in feeds if str(x).strip()]
+    except FileNotFoundError:
+        return []
+
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -57,7 +60,8 @@ def fetch_new_entries():
     cutoff = get_last_run()
     all_entries = []
 
-    for feed_url in SUBSTACK_FEEDS:
+    feeds = load_feeds()
+    for feed_url in feeds:
         parsed = feedparser.parse(feed_url)
 
         for entry in parsed.entries:
