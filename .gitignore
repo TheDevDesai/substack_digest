@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+last_run.txt
+run_digest.sh
+cron.log
+
+
