@@ -1,13 +1,14 @@
-name: Substack Daily Digest
+name: Substack Digest + Commands
 
 on:
+  # Daily digest at 00:00 UTC = 08:00 SGT
   schedule:
-    # 00:00 UTC every day = 08:00 SGT
-    - cron: "0 0 * * *"
-  workflow_dispatch: {}  # allow manual trigger
+    - cron: "0 0 * * *"      # daily digest
+    - cron: "0 * * * *"      # commands-only, auto-restarts every hour
+  workflow_dispatch: {}       # manual trigger (commands mode)
 
 jobs:
-  run-digest:
+  run-bot:
     runs-on: ubuntu-latest
 
     env:
@@ -29,7 +30,40 @@ jobs:
           python -m pip install --upgrade pip
           pip install feedparser python-dateutil requests openai
 
-      - name: Run Substack digest script
+      - name: Decide mode (digest vs commands)
+        id: mode
         run: |
-          python substack_to_telegram.py
+          # Default mode is commands
+          MODE="commands"
+
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # For scheduled events, look at which cron fired
+            if [ "${{ github.event.schedule }}" = "0 0 * * *" ]; then
+              MODE="digest"
+            else
+              MODE="commands"
+            fi
+          fi
+
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "Running mode: $MODE"
+
+      - name: Run bot
+        run: |
+          if [ "${{ steps.mode.outputs.mode }}" = "digest" ]; then
+            echo "Running DAILY DIGEST mode..."
+            python3 substack_to_telegram.py
+          else
+            echo "Running COMMANDS-ONLY mode (auto-stop after ~50 minutes)..."
+
+            # run bot in background
+            python3 substack_to_telegram.py --commands-only &
+            BOT_PID=$!
+
+            # Let it run for ~50 minutes, then stop so the next hourly cron can restart it
+            sleep 3000 || true   # 3000s ≈ 50 minutes
+
+            echo "Stopping bot process $BOT_PID (if still running)..."
+            kill "$BOT_PID" 2>/dev/null || true
+          fi
 
