@@ -34,210 +34,95 @@ def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f)
 
+import json
+import os
 
-def send_message(chat_id, text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-    }
-    requests.post(url, json=payload, timeout=15)
+STATE_FILE = "user_state.json"
 
+# -----------------------------
+#  Load & Save State
+# -----------------------------
 
-def normalise_feed_url(text):
-    text = text.strip()
-    # If user pastes a substack URL like https://something.substack.com/ or /posts
-    # try to normalise to its /feed
-    if "substack.com" in text and "/feed" not in text:
-        text = re.sub(r"/posts/?$", "", text)
-        if not text.endswith("/"):
-            text += "/"
-        text += "feed"
-    return text
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        return {}
+    try:
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {}
 
-def list_feeds():
-    """Return the current list of feeds."""
-    return load_feeds()
+def save_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
 
+# -----------------------------
+#  Helper: Ensure user exists
+# -----------------------------
 
-def add_feed(url):
-    """Add a new feed if it doesn't already exist.
+def ensure_user(user_id):
+    state = load_state()
+    if str(user_id) not in state:
+        state[str(user_id)] = {
+            "feeds": [],
+            "digest_time": "08:00",
+            "last_sent_date": ""
+        }
+        save_state(state)
+    return state
 
-    Returns (added: bool, message_or_url: str)
-    """
-    feeds = load_feeds()
-    url = normalise_feed_url(url)
-    if url in feeds:
-        return False, "Feed already present."
-    feeds.append(url)
-    save_feeds(feeds)
+# -----------------------------
+#  Feed Management
+# -----------------------------
+
+def list_feeds(user_id):
+    state = ensure_user(user_id)
+    return state[str(user_id)]["feeds"]
+
+def add_feed(user_id, url):
+    state = ensure_user(user_id)
+    url = url.strip()
+
+    if url in state[str(user_id)]["feeds"]:
+        return False, "Feed already added."
+
+    state[str(user_id)]["feeds"].append(url)
+    save_state(state)
     return True, url
 
+def remove_feed(user_id, url_or_index):
+    state = ensure_user(user_id)
+    feeds = state[str(user_id)]["feeds"]
 
-def remove_feed(arg):
-    """Remove a feed by URL or by 1-based index.
-
-    Returns (removed: bool, message_or_url: str)
-    """
-    feeds = load_feeds()
-    removed = None
-
-    # Allow numeric index: /removefeed 3
-    if arg.isdigit():
-        idx = int(arg) - 1
+    # Remove by index (1-based)
+    if url_or_index.isdigit():
+        idx = int(url_or_index) - 1
         if 0 <= idx < len(feeds):
             removed = feeds.pop(idx)
-    else:
-        url = normalise_feed_url(arg)
-        if url in feeds:
-            feeds.remove(url)
-            removed = url
+            save_state(state)
+            return True, removed
+        return False, "Invalid index."
 
-    if removed:
-        save_feeds(feeds)
-        return True, removed
-    else:
-        return False, "Could not find that feed to remove."
+    # Remove by URL
+    if url_or_index in feeds:
+        feeds.remove(url_or_index)
+        save_state(state)
+        return True, url_or_index
 
+    return False, "Feed not found."
 
-def handle_command(chat_id, text, feeds):
-    text = text.strip()
-    lowered = text.lower()
+# -----------------------------
+#  Digest Time
+# -----------------------------
 
-    if lowered.startswith("/start"):
-        send_message(
-            chat_id,
-            "Hi! Send me a Substack (or RSS) URL with /add to subscribe.\n\n"
-            "Commands:\n"
-            "/add <url> – add a new feed\n"
-            "/feedlist – list current feeds\n"
-            "/remove <url or index> – remove a feed\n",
-        )
-        return feeds, False
-
-    if lowered.startswith("/feedlist"):
-        if not feeds:
-            send_message(chat_id, "No feeds are configured yet.")
-            return feeds, False
-        lines = ["Current feeds:"]
-        for i, url in enumerate(feeds, start=1):
-            lines.append(f"{i}. {url}")
-        send_message(chat_id, "\n".join(lines))
-        return feeds, False
-
-    if lowered.startswith("/add"):
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            send_message(chat_id, "Usage: /add <feed_url>")
-            return feeds, False
-        url = normalise_feed_url(parts[1])
-        if url in feeds:
-            send_message(chat_id, f"Feed already present:\n{url}")
-            return feeds, False
-        feeds.append(url)
-        save_feeds(feeds)
-        send_message(chat_id, f"✅ Added feed:\n{url}")
-        return feeds, True
-
-    if lowered.startswith("/remove"):
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            send_message(chat_id, "Usage: /remove <feed_url or index>")
-            return feeds, False
-
-        arg = parts[1].strip()
-        removed = None
-
-        # Allow numeric index: /remove 3
-        if arg.isdigit():
-            idx = int(arg) - 1
-            if 0 <= idx < len(feeds):
-                removed = feeds.pop(idx)
-        else:
-            url = normalise_feed_url(arg)
-            if url in feeds:
-                feeds.remove(url)
-                removed = url
-
-        if removed:
-            save_feeds(feeds)
-            send_message(chat_id, f"🗑 Removed feed:\n{removed}")
-            return feeds, True
-        else:
-            send_message(chat_id, "Could not find that feed to remove.")
-            return feeds, False
-
-    # Also support bare URL: user just pastes a link
-    if "http://" in text or "https://" in text:
-        url = normalise_feed_url(text)
-        if url not in feeds:
-            feeds.append(url)
-            save_feeds(feeds)
-            send_message(
-                chat_id,
-                f"✅ Added feed (from plain URL):\n{url}\n\n"
-                "Use /feedlist to see all feeds.",
-            )
-            return feeds, True
-
-    # Unknown command; you could send help or ignore
-    return feeds, False
-
-
-def main():
-    state = load_state()
-    last_update_id = state.get("last_update_id", 0)
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-    params = {"timeout": 5}
-    if last_update_id:
-        params["offset"] = last_update_id + 1
-
-    resp = requests.get(url, params=params, timeout=20)
-    data = resp.json()
-    if not data.get("ok"):
-        return
-
-    updates = data.get("result", [])
-    if not updates:
-        return
-
-    feeds = load_feeds()
-    changed = False
-    max_update_id = last_update_id
-
-    for update in updates:
-        update_id = update["update_id"]
-        max_update_id = max(max_update_id, update_id)
-
-        msg = update.get("message") or update.get("edited_message")
-        if not msg:
-            continue
-
-        chat_id = msg["chat"]["id"]
-        # Optional: ignore other chats if you want
-        if TELEGRAM_CHAT_ID and str(chat_id) != str(TELEGRAM_CHAT_ID):
-            continue
-
-        text = msg.get("text", "")
-        if not text:
-            continue
-
-        feeds, did_change = handle_command(chat_id, text, feeds)
-        if did_change:
-            changed = True
-
-    state["last_update_id"] = max_update_id
+def set_digest_time(user_id, time_str):
+    """time_str format: HH:MM"""
+    state = ensure_user(user_id)
+    state[str(user_id)]["digest_time"] = time_str
     save_state(state)
+    return True
 
-    # The GitHub Action will handle committing & pushing FEEDS_FILE/STATE_FILE
-    if changed:
-        print("Feeds updated.")
-    else:
-        print("No feed changes.")
-
-
-if __name__ == "__main__":
-    main()
+def get_digest_time(user_id):
+    state = ensure_user(user_id)
+    return state[str(user_id)]["digest_time"]
 
