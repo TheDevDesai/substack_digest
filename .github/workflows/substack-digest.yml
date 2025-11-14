@@ -1,11 +1,16 @@
 name: Substack Digest + Commands
 
 on:
-  # Daily digest at 00:00 UTC = 08:00 SGT
+  # Manual trigger only (for commands mode)
+  workflow_dispatch: {}
+
+  # Daily digest only (1 run per day)
   schedule:
-    - cron: "0 0 * * *"      # daily digest
-    - cron: "0 * * * *"      # commands-only, auto-restarts every hour
-  workflow_dispatch: {}       # manual trigger (commands mode)
+    - cron: "0 0 * * *"   # 00:00 UTC = 08:00 SGT
+
+concurrency:
+  group: substack-digest-bot
+  cancel-in-progress: true
 
 jobs:
   run-bot:
@@ -30,40 +35,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install feedparser python-dateutil requests openai
 
-      - name: Decide mode (digest vs commands)
+      - name: Decide mode (digest or commands)
         id: mode
         run: |
-          # Default mode is commands
           MODE="commands"
-
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            # For scheduled events, look at which cron fired
-            if [ "${{ github.event.schedule }}" = "0 0 * * *" ]; then
-              MODE="digest"
-            else
-              MODE="commands"
-            fi
+            MODE="digest"
           fi
+          echo "MODE=$MODE" >> $GITHUB_OUTPUT
 
-          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
-          echo "Running mode: $MODE"
-
-      - name: Run bot
+      - name: Run digest
+        if: steps.mode.outputs.MODE == 'digest'
         run: |
-          if [ "${{ steps.mode.outputs.mode }}" = "digest" ]; then
-            echo "Running DAILY DIGEST mode..."
-            python3 substack_to_telegram.py
-          else
-            echo "Running COMMANDS-ONLY mode (auto-stop after ~50 minutes)..."
+          python substack_to_telegram.py
 
-            # run bot in background
-            python3 substack_to_telegram.py --commands-only &
-            BOT_PID=$!
-
-            # Let it run for ~50 minutes, then stop so the next hourly cron can restart it
-            sleep 3000 || true   # 3000s ≈ 50 minutes
-
-            echo "Stopping bot process $BOT_PID (if still running)..."
-            kill "$BOT_PID" 2>/dev/null || true
-          fi
+      - name: Run commands mode
+        if: steps.mode.outputs.MODE == 'commands'
+        run: |
+          python substack_to_telegram.py --commands-only
 
