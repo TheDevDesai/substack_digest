@@ -1,139 +1,263 @@
-# 📬 Substack Digest + Telegram Bot
+# 📬 Substack Digest Bot
 
-This repository contains a GitHub Actions-powered bot that:
+A Telegram bot that aggregates your favorite Substack newsletters and sends you daily digests with **AI-powered SCQR summaries**. Features subscription tiers, security measures, and runs on GitHub Actions.
 
-### ✅ Fetches the newest posts from your selected RSS/Substack feeds  
-### ✅ Builds a clean daily digest  
-### ✅ Sends the digest to a Telegram chat  
-### ✅ Supports Telegram commands:
-- `/feedlist` — Show the current feed list  
-- `/addfeed <url>` — Add a new RSS/Substack feed  
-- `/removefeed <url or index>` — Remove a feed  
-- `/dailydigest` — Manually trigger a digest  
+## ✨ Features
 
-All commands run in **commands-only mode**, while the digest is sent **once per day** at 08:00 SGT (00:00 UTC).
+- **Daily Digests**: Automated summary of new posts at your preferred time
+- **AI SCQR Summaries**: Situation-Complication-Question-Resolution analysis (paid tiers)
+- **Per-User Feeds**: Each user manages their own subscriptions
+- **Subscription Tiers**: Free, Basic ($5/mo), and Pro ($12/mo) plans
+- **Security**: Rate limiting, URL validation, user blocking
+- **Stripe Integration**: Webhook-based subscription payments
+- **Serverless**: Runs on GitHub Actions, no hosting needed
 
----
+## 🎯 SCQR Summary Format
 
-## 🚀 Features
+The bot uses the SCQR framework to analyze articles:
 
-- RSS feed parsing via `feedparser`
-- Daily digest with summaries, sources, timestamps
-- Telegram Bot API integration
-- GitHub Action automation
-- Automatic feed management (`feeds.json`)
-- Prevents duplicate runs via `concurrency` safeguards
+- **S (Situation)**: What is the current context?
+- **C (Complication)**: What problem or challenge exists?
+- **Q (Question)**: What key question does this raise?
+- **R (Resolution)**: What insight or answer does the article provide?
 
----
+Example output:
+```
+📚 Daily Digest — 3 new post(s)
+━━━━━━━━━━━━━━━━━━━━
 
-## 📅 Automation Schedule
+1. The Future of AI in Healthcare
+📰 Tech Insider • Nov 21, 14:30
+🔗 https://example.substack.com/p/ai-healthcare
 
-The workflow triggers:
+📋 SCQR Summary:
+S: AI adoption in healthcare has accelerated post-pandemic
+C: Regulatory hurdles and data privacy concerns slow implementation
+Q: How can healthcare providers safely integrate AI while maintaining patient trust?
+R: A hybrid approach combining AI efficiency with human oversight shows the most promise
+```
 
-- **Daily at 08:00 SGT (00:00 UTC)** — sends digest  
-- **Manual trigger** — runs commands mode  
-  (`/feedlist`, `/addfeed`, `/removefeed`, `/dailydigest`)
+## 💰 Subscription Tiers
 
----
+| Feature | Free | Basic ($5/mo) | Pro ($12/mo) |
+|---------|------|---------------|--------------|
+| Max Feeds | 3 | 15 | 50 |
+| AI Summaries | ❌ | ✅ | ✅ |
+| Digest Frequency | Daily | Daily | Custom |
 
-## 📦 GitHub Actions Workflow
+## 🚀 Quick Start
 
-The workflow is stored here:
-.github/workflows/substack-digest.yml
+### 1. Create a Telegram Bot
 
+1. Message [@BotFather](https://t.me/BotFather) on Telegram
+2. Send `/newbot` and follow the prompts
+3. Save the **Bot Token**
 
-It automatically:
+### 2. Get Your Chat ID
 
-1. Installs dependencies  
-2. Decides if it's running in **digest** or **commands** mode  
-3. Runs the correct Python entrypoint  
+1. Start a chat with your bot
+2. Visit `https://api.telegram.org/bot<TOKEN>/getUpdates`
+3. Find your `chat.id` in the response
 
----
+### 3. Configure GitHub Secrets
 
-## 🧩 Project Structure
+Go to **Settings → Secrets and variables → Actions** and add:
 
-📁 substack_digest
-│
-├── substack_to_telegram.py # Main bot logic
-├── manage_feeds.py # Add/remove/list feed management
-├── feeds.json # Your dynamic feed list
-├── feed_state.json # Tracks last-run timestamp
-│
-📁 .github/workflows
-│ └── substack-digest.yml # GitHub Actions workflow
-│
-├── README.md
-└── LICENSE
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `TELEGRAM_BOT_TOKEN` | ✅ | Bot token from BotFather |
+| `TELEGRAM_CHAT_ID` | ✅ | Your Telegram chat ID |
+| `OPENAI_API_KEY` | For AI | OpenAI API key for summaries |
+| `STRIPE_SECRET_KEY` | For payments | Stripe secret key |
+| `STRIPE_WEBHOOK_SECRET` | For payments | Stripe webhook signing secret |
 
+### 4. Enable GitHub Actions
 
----
+Go to the **Actions** tab and enable workflows.
 
-## 🔧 Requirements
+## 📱 Telegram Commands
 
-This project uses:
+| Command | Description |
+|---------|-------------|
+| `/start` | Welcome message and help |
+| `/feedlist` | Show your subscribed feeds |
+| `/addfeed <url>` | Add a new Substack feed |
+| `/removefeed <# or url>` | Remove a feed |
+| `/digest` | Get your digest now |
+| `/status` | View subscription status |
+| `/upgrade [tier]` | Upgrade your plan |
+| `/manage` | Manage billing (Stripe) |
 
-- Python 3.11
-- `feedparser`
-- `requests`
-- `python-dateutil`
-- `openai` (optional for summarization)
+## 🔒 Security Features
 
----
+### URL Validation
+- Blocks internal/private IPs (localhost, 192.168.x.x, etc.)
+- Enforces HTTPS for known platforms
+- Auto-appends `/feed` to Substack URLs
 
-## 🔐 Required Secrets
+### Rate Limiting
+- 10 commands per minute
+- 20 feed additions per hour
+- 5 digest requests per hour
 
-Configure these in:
+### User Management
+- Block/unblock users
+- Failed attempt tracking
+- Subscription expiry handling
 
+## 💳 Setting Up Payments (Stripe)
 
+### 1. Create Stripe Products
 
-Settings → Secrets & Variables → Actions
+In your Stripe Dashboard, create two products:
+- **Basic Plan**: $5/month subscription
+- **Pro Plan**: $12/month subscription
 
+### 2. Get Price IDs
 
-| Secret | Description |
-|--------|-------------|
-| `OPENAI_API_KEY` | Used for summaries (optional) |
-| `TELEGRAM_BOT_TOKEN` | Bot token from BotFather |
-| `TELEGRAM_CHAT_ID` | Chat/group ID where digest is sent |
+Set these as environment variables:
+```
+STRIPE_PRICE_BASIC=price_xxxxx
+STRIPE_PRICE_PRO=price_xxxxx
+```
 
----
+### 3. Deploy Webhook Handler
 
-## 📌 Usage in Telegram
+Deploy `stripe_webhook.py` as a web service:
 
-### Show feeds
+**Option A: Vercel**
+```bash
+vercel deploy
+```
 
+**Option B: Railway**
+```bash
+railway up
+```
 
-/feedlist
+**Option C: AWS Lambda**
+Use the included `lambda_handler` function.
 
+### 4. Configure Webhook in Stripe
 
-### Add feed
+1. Go to Stripe Dashboard → Webhooks
+2. Add endpoint: `https://your-app.com/webhook/stripe`
+3. Select events:
+   - `checkout.session.completed`
+   - `customer.subscription.updated`
+   - `customer.subscription.deleted`
+   - `invoice.payment_failed`
+4. Copy the signing secret to `STRIPE_WEBHOOK_SECRET`
 
+## 📁 Project Structure
 
-/addfeed https://example.substack.com/feed
+```
+├── substack_to_telegram.py   # Main bot logic
+├── manage_feeds.py           # Feed & subscription management
+├── ai_summarizer.py          # OpenAI SCQR summary generation
+├── stripe_webhook.py         # Payment webhook handler
+├── user_state.json           # User data storage
+├── requirements.txt          # Python dependencies
+├── .github/
+│   └── workflows/
+│       └── substack-digest.yml
+└── README.md
+```
 
+## ⚙️ Configuration
 
-### Remove feed
+### Environment Variables
 
+| Variable | Description |
+|----------|-------------|
+| `TELEGRAM_BOT_TOKEN` | Telegram Bot API token |
+| `TELEGRAM_CHAT_ID` | Default chat for digests |
+| `OPENAI_API_KEY` | OpenAI API key |
+| `STRIPE_SECRET_KEY` | Stripe API key |
+| `STRIPE_WEBHOOK_SECRET` | Webhook signing secret |
+| `STRIPE_PRICE_BASIC` | Basic tier price ID |
+| `STRIPE_PRICE_PRO` | Pro tier price ID |
+| `WEBHOOK_BASE_URL` | Your webhook server URL |
 
-/removefeed 3
+### Customizing Digest Time
 
+Edit `.github/workflows/substack-digest.yml`:
 
-### Request digest manually
+```yaml
+schedule:
+  - cron: "0 0 * * *"  # 00:00 UTC
+```
 
+## 🛠️ Development
 
-/dailydigest
+### Local Testing
 
+```bash
+# Install dependencies
+pip install -r requirements.txt
 
----
+# Set environment variables
+export TELEGRAM_BOT_TOKEN="your_token"
+export TELEGRAM_CHAT_ID="your_chat_id"
+export OPENAI_API_KEY="your_openai_key"
 
-## 📝 License
+# Run digest mode
+python substack_to_telegram.py
 
-MIT License — see `LICENSE` for full text.
+# Run command mode
+python substack_to_telegram.py --commands --duration=60
+```
 
----
+### Running Webhook Server Locally
+
+```bash
+# Install Flask
+pip install flask
+
+# Run webhook server
+python stripe_webhook.py
+
+# Use ngrok for testing
+ngrok http 8080
+```
+
+## 📊 API Cost Estimates
+
+Using `gpt-4o-mini` for summaries:
+- ~800 input tokens per article
+- ~200 output tokens per summary
+- **Cost: ~$0.0002 per article** (~$0.002 for 10 articles)
+
+## 🔧 Troubleshooting
+
+**Bot not responding?**
+- Check `TELEGRAM_BOT_TOKEN` is correct
+- Ensure GitHub Actions are enabled
+- Check Actions logs for errors
+
+**No AI summaries?**
+- Verify `OPENAI_API_KEY` is set
+- Check user is on paid tier (`/status`)
+- Check OpenAI API credits
+
+**Payments not working?**
+- Verify webhook URL is accessible
+- Check Stripe webhook logs
+- Ensure signing secret matches
+
+## 📄 License
+
+MIT License — see [LICENSE](LICENSE) for details.
 
 ## 🤝 Contributing
 
-PRs welcome!  
-You may fork and customize it for any personal or research use.
+Pull requests welcome! Please:
+
+1. Fork the repository
+2. Create a feature branch
+3. Add tests if applicable
+4. Submit a PR with description
 
 ---
+
+Made with ❤️ for newsletter enthusiasts
