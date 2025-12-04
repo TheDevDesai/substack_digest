@@ -50,6 +50,11 @@ from manage_feeds import (
     register_user,
     get_user_id_by_username,
     get_all_known_users,
+    # Analytics functions
+    record_payment,
+    record_event,
+    get_recent_payments,
+    get_payment_stats_by_period,
 )
 
 from ai_summarizer import (
@@ -287,6 +292,7 @@ def handle_successful_payment(message: dict) -> None:
     total_amount = payment.get("total_amount", 0)
     currency = payment.get("currency", "")
     payload = payment.get("invoice_payload", "")
+    payment_id = payment.get("telegram_payment_charge_id", "")
     
     print(f"Payment success! User {user_id} paid {total_amount} {currency}")
     
@@ -300,13 +306,17 @@ def handle_successful_payment(message: dict) -> None:
         return
     
     if payload.startswith("pro_subscription_"):
+        # Record payment for analytics
+        record_payment(user_id, total_amount, payment_id)
+        record_event("subscription_purchase", user_id, f"Pro {PRO_DURATION_DAYS} days")
+        
         expires_at = (datetime.now(timezone.utc) + timedelta(days=PRO_DURATION_DAYS)).isoformat()
         
         upgrade_subscription(
             user_id=user_id,
             tier="pro",
             stripe_customer_id=None,
-            stripe_subscription_id=f"telegram_stars_{payment.get('telegram_payment_charge_id', '')}",
+            stripe_subscription_id=f"telegram_stars_{payment_id}",
             expires_at=expires_at,
         )
         
@@ -578,8 +588,11 @@ def handle_owner(chat_id: str, user_id: str, args: str) -> None:
             "/owner block &lt;@user&gt; &lt;reason&gt; — Block user\n"
             "/owner unblock &lt;@user&gt; — Unblock user\n\n"
             
-            "<b>📊 Stats & Tools:</b>\n"
-            "/owner stats — Bot statistics\n"
+            "<b>📊 Analytics:</b>\n"
+            "/owner stats — Full analytics dashboard\n"
+            "/owner payments — Recent payments\n\n"
+            
+            "<b>🛠 Tools:</b>\n"
             "/owner testpayment — Test Stars payment\n"
             "/owner broadcast &lt;msg&gt; — Message all users"
         )
@@ -592,13 +605,27 @@ def handle_owner(chat_id: str, user_id: str, args: str) -> None:
     
     if subcommand == "stats":
         stats = get_all_stats()
+        payment_stats = get_payment_stats_by_period()
+        
         text = (
-            "📊 <b>Bot Statistics</b>\n\n"
-            f"<b>Total Users:</b> {stats['total_users']}\n"
-            f"<b>Pro Users:</b> {stats['pro_users']}\n"
-            f"<b>Free Users:</b> {stats['free_users']}\n"
-            f"<b>Admins:</b> {stats['admin_count']}\n"
-            f"<b>Total Feeds:</b> {stats['total_feeds']}"
+            "📊 <b>Bot Analytics</b>\n\n"
+            
+            "<b>👥 Users:</b>\n"
+            f"• Total: {stats['total_users']}\n"
+            f"• New this month: {stats['new_users_this_month']}\n"
+            f"• Pro: {stats['pro_users']} | Free: {stats['free_users']}\n"
+            f"• Admins: {stats['admin_count']}\n\n"
+            
+            "<b>📰 Feeds:</b>\n"
+            f"• Total subscribed: {stats['total_feeds']}\n\n"
+            
+            "<b>💰 Revenue (Stars):</b>\n"
+            f"• Today: ⭐{payment_stats['today']['revenue']} ({payment_stats['today']['count']} payments)\n"
+            f"• This week: ⭐{payment_stats['week']['revenue']} ({payment_stats['week']['count']} payments)\n"
+            f"• This month: ⭐{payment_stats['month']['revenue']} ({payment_stats['month']['count']} payments)\n"
+            f"• All time: ⭐{payment_stats['all_time']['revenue']} ({payment_stats['all_time']['count']} payments)\n\n"
+            
+            f"<i>~${payment_stats['all_time']['revenue'] * 0.02:.2f} USD total (before Telegram fees)</i>"
         )
         send_message(chat_id, text, html=True)
     
@@ -658,6 +685,19 @@ def handle_owner(chat_id: str, user_id: str, args: str) -> None:
                 lines.append(f"• {username} {name} (ID: {u['user_id']})")
             if len(users) > 50:
                 lines.append(f"\n... and {len(users) - 50} more")
+            send_message(chat_id, "\n".join(lines), html=True)
+    
+    elif subcommand == "payments":
+        payments = get_recent_payments(10)
+        if not payments:
+            send_message(chat_id, "💰 No payments recorded yet.")
+        else:
+            lines = ["<b>💰 Recent Payments:</b>\n"]
+            for p in payments:
+                username = f"@{p['username']}" if p.get('username') else p['user_id']
+                timestamp = p['timestamp'][:10]  # Just the date
+                amount = p.get('amount', 0)
+                lines.append(f"• {username}: ⭐{amount} ({timestamp})")
             send_message(chat_id, "\n".join(lines), html=True)
     
     elif subcommand == "block":

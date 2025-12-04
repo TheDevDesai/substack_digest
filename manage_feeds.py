@@ -17,6 +17,7 @@ from typing import Optional
 STATE_FILE = "user_state.json"
 CONFIG_FILE = "bot_config.json"
 USERNAME_MAP_FILE = "username_map.json"
+ANALYTICS_FILE = "analytics.json"
 
 # Subscription tiers and limits
 TIERS = {
@@ -669,6 +670,7 @@ def get_all_stats() -> dict:
     """Get overall bot statistics (for owner)."""
     state = load_state()
     config = load_config()
+    analytics = load_analytics()
     
     total_users = len(state)
     total_feeds = sum(len(u.get("feeds", [])) for u in state.values())
@@ -676,10 +678,129 @@ def get_all_stats() -> dict:
     free_users = total_users - pro_users
     admin_count = len(config.get("admins", []))
     
+    # Payment stats
+    payments = analytics.get("payments", [])
+    total_revenue_stars = sum(p.get("amount", 0) for p in payments)
+    total_payments = len(payments)
+    
+    # This month's stats
+    now = datetime.now(timezone.utc)
+    first_of_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    this_month_payments = [p for p in payments if p.get("timestamp", "") >= first_of_month.isoformat()]
+    this_month_revenue = sum(p.get("amount", 0) for p in this_month_payments)
+    this_month_count = len(this_month_payments)
+    
+    # New users this month
+    new_users_this_month = sum(
+        1 for u in state.values() 
+        if u.get("subscription", {}).get("created_at", "") >= first_of_month.isoformat()
+    )
+    
     return {
         "total_users": total_users,
         "total_feeds": total_feeds,
         "pro_users": pro_users,
         "free_users": free_users,
         "admin_count": admin_count,
+        "total_payments": total_payments,
+        "total_revenue_stars": total_revenue_stars,
+        "this_month_payments": this_month_count,
+        "this_month_revenue_stars": this_month_revenue,
+        "new_users_this_month": new_users_this_month,
+    }
+
+
+# -----------------------------
+#  Analytics & Payment Tracking
+# -----------------------------
+
+def load_analytics() -> dict:
+    """Load analytics data."""
+    if not os.path.exists(ANALYTICS_FILE):
+        return {"payments": [], "events": []}
+    try:
+        with open(ANALYTICS_FILE, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return {"payments": [], "events": []}
+
+
+def save_analytics(analytics: dict) -> None:
+    """Save analytics data."""
+    with open(ANALYTICS_FILE, "w") as f:
+        json.dump(analytics, f, indent=2)
+
+
+def record_payment(user_id: str, amount: int, payment_id: str = None) -> None:
+    """Record a payment for analytics."""
+    analytics = load_analytics()
+    
+    username = get_username_by_user_id(user_id)
+    
+    payment = {
+        "user_id": str(user_id),
+        "username": username,
+        "amount": amount,
+        "currency": "XTR",
+        "payment_id": payment_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    
+    analytics["payments"].append(payment)
+    save_analytics(analytics)
+
+
+def record_event(event_type: str, user_id: str = None, details: str = None) -> None:
+    """Record an event for analytics."""
+    analytics = load_analytics()
+    
+    event = {
+        "type": event_type,
+        "user_id": str(user_id) if user_id else None,
+        "details": details,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    
+    analytics["events"].append(event)
+    save_analytics(analytics)
+
+
+def get_recent_payments(limit: int = 10) -> list:
+    """Get recent payments."""
+    analytics = load_analytics()
+    payments = analytics.get("payments", [])
+    return sorted(payments, key=lambda p: p.get("timestamp", ""), reverse=True)[:limit]
+
+
+def get_payment_stats_by_period() -> dict:
+    """Get payment stats grouped by period."""
+    analytics = load_analytics()
+    payments = analytics.get("payments", [])
+    
+    now = datetime.now(timezone.utc)
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_ago = today - timedelta(days=7)
+    month_ago = today - timedelta(days=30)
+    
+    today_payments = [p for p in payments if p.get("timestamp", "") >= today.isoformat()]
+    week_payments = [p for p in payments if p.get("timestamp", "") >= week_ago.isoformat()]
+    month_payments = [p for p in payments if p.get("timestamp", "") >= month_ago.isoformat()]
+    
+    return {
+        "today": {
+            "count": len(today_payments),
+            "revenue": sum(p.get("amount", 0) for p in today_payments),
+        },
+        "week": {
+            "count": len(week_payments),
+            "revenue": sum(p.get("amount", 0) for p in week_payments),
+        },
+        "month": {
+            "count": len(month_payments),
+            "revenue": sum(p.get("amount", 0) for p in month_payments),
+        },
+        "all_time": {
+            "count": len(payments),
+            "revenue": sum(p.get("amount", 0) for p in payments),
+        },
     }
