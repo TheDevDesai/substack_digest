@@ -1,7 +1,10 @@
 """
 Feed Management Module for Substack Digest Bot
 
-Handles per-user feed subscriptions, admin/user roles, and subscription tiers.
+Handles per-user feed subscriptions with three-tier hierarchy:
+- Owner: Full control (add/remove admins, block users, broadcast, etc.)
+- Admin: Free Pro access only (no admin commands)
+- User: Regular free/paid users
 """
 
 import json
@@ -12,7 +15,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 STATE_FILE = "user_state.json"
-ADMIN_FILE = "admins.json"
+CONFIG_FILE = "bot_config.json"
+USERNAME_MAP_FILE = "username_map.json"
 
 # Subscription tiers and limits
 TIERS = {
@@ -26,7 +30,7 @@ TIERS = {
         "max_feeds": 50,
         "digest_frequency": "custom",
         "ai_summaries": True,
-        "price_monthly": 1,  # $1/month
+        "price_monthly": 1,
     },
 }
 
@@ -39,77 +43,206 @@ RATE_LIMITS = {
 
 
 # -----------------------------
-#  Admin Management
+#  Bot Config (Owner & Admins)
 # -----------------------------
 
-def load_admins() -> list:
-    """Load list of admin user IDs."""
-    if not os.path.exists(ADMIN_FILE):
-        return []
+def load_config() -> dict:
+    """Load bot configuration (owner and admins)."""
+    if not os.path.exists(CONFIG_FILE):
+        return {"owner_id": None, "admins": []}
     try:
-        with open(ADMIN_FILE, "r") as f:
-            data = json.load(f)
-            return data.get("admins", [])
+        with open(CONFIG_FILE, "r") as f:
+            return json.load(f)
     except (json.JSONDecodeError, IOError):
-        return []
+        return {"owner_id": None, "admins": []}
 
 
-def save_admins(admin_ids: list) -> None:
-    """Save list of admin user IDs."""
-    with open(ADMIN_FILE, "w") as f:
-        json.dump({"admins": admin_ids}, f, indent=2)
+def save_config(config: dict) -> None:
+    """Save bot configuration."""
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(config, f, indent=2)
+
+
+def get_owner_id() -> Optional[str]:
+    """Get the owner's user ID."""
+    config = load_config()
+    return config.get("owner_id")
+
+
+def set_owner_id(user_id: str) -> None:
+    """Set the owner's user ID (only if not already set)."""
+    config = load_config()
+    if not config.get("owner_id"):
+        config["owner_id"] = str(user_id)
+        save_config(config)
+
+
+def is_owner(user_id: str) -> bool:
+    """Check if user is the owner."""
+    owner_id = get_owner_id()
+    return owner_id is not None and str(user_id) == str(owner_id)
 
 
 def is_admin(user_id: str) -> bool:
-    """Check if a user is an admin."""
-    admins = load_admins()
+    """Check if user is an admin (has free Pro access)."""
+    config = load_config()
+    admins = config.get("admins", [])
     return str(user_id) in [str(a) for a in admins]
 
 
-def add_admin(user_id: str) -> tuple[bool, str]:
-    """Add a user as admin. Returns (success, message)."""
-    admins = load_admins()
+def is_privileged(user_id: str) -> bool:
+    """Check if user is owner OR admin (has Pro access)."""
+    return is_owner(user_id) or is_admin(user_id)
+
+
+def add_admin(identifier: str) -> tuple[bool, str]:
+    """Add a user as admin (free Pro access). Only owner can do this."""
+    config = load_config()
+    admins = config.get("admins", [])
+    
+    # Check if it's a username
+    if identifier.startswith("@"):
+        user_id = get_user_id_by_username(identifier)
+        if not user_id:
+            return False, f"Username {identifier} not found. They need to message the bot first."
+        username = identifier
+    else:
+        user_id = identifier
+        username = get_username_by_user_id(user_id)
+    
     user_id = str(user_id)
     
+    # Can't add owner as admin
+    if is_owner(user_id):
+        return False, "Cannot add owner as admin."
+    
     if user_id in [str(a) for a in admins]:
-        return False, "User is already an admin."
+        display = f"@{username}" if username else user_id
+        return False, f"{display} is already an admin."
     
     admins.append(user_id)
-    save_admins(admins)
+    config["admins"] = admins
+    save_config(config)
     
-    # Upgrade admin to pro tier automatically
-    state = ensure_user(user_id)
-    state[user_id]["subscription"]["tier"] = "pro"
-    state[user_id]["subscription"]["is_admin"] = True
-    state[user_id]["subscription"]["expires_at"] = None  # Never expires for admins
-    save_state(state)
-    
-    return True, f"User {user_id} is now an admin with Pro features."
+    display = f"@{username}" if username else user_id
+    return True, f"{display} now has free Pro access."
 
 
-def remove_admin(user_id: str) -> tuple[bool, str]:
+def remove_admin(identifier: str) -> tuple[bool, str]:
     """Remove admin status from a user."""
-    admins = load_admins()
+    config = load_config()
+    admins = config.get("admins", [])
+    
+    if identifier.startswith("@"):
+        user_id = get_user_id_by_username(identifier)
+        if not user_id:
+            return False, f"Username {identifier} not found."
+        username = identifier
+    else:
+        user_id = identifier
+        username = get_username_by_user_id(user_id)
+    
     user_id = str(user_id)
     
     if user_id not in [str(a) for a in admins]:
-        return False, "User is not an admin."
+        display = f"@{username}" if username else user_id
+        return False, f"{display} is not an admin."
     
     admins = [a for a in admins if str(a) != user_id]
-    save_admins(admins)
+    config["admins"] = admins
+    save_config(config)
     
-    # Downgrade to free tier
-    state = ensure_user(user_id)
-    state[user_id]["subscription"]["tier"] = "free"
-    state[user_id]["subscription"]["is_admin"] = False
-    save_state(state)
-    
-    return True, f"User {user_id} is no longer an admin."
+    display = f"@{username}" if username else user_id
+    return True, f"{display} no longer has admin access."
 
 
 def list_admins() -> list:
-    """Get list of all admin user IDs."""
-    return load_admins()
+    """Get list of all admins with their usernames."""
+    config = load_config()
+    admin_ids = config.get("admins", [])
+    result = []
+    
+    for admin_id in admin_ids:
+        username = get_username_by_user_id(admin_id)
+        if username:
+            result.append(f"@{username} ({admin_id})")
+        else:
+            result.append(str(admin_id))
+    
+    return result
+
+
+# -----------------------------
+#  Username <-> User ID Mapping
+# -----------------------------
+
+def load_username_map() -> dict:
+    """Load username to user_id mapping."""
+    if not os.path.exists(USERNAME_MAP_FILE):
+        return {}
+    try:
+        with open(USERNAME_MAP_FILE, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return {}
+
+
+def save_username_map(mapping: dict) -> None:
+    """Save username to user_id mapping."""
+    with open(USERNAME_MAP_FILE, "w") as f:
+        json.dump(mapping, f, indent=2)
+
+
+def register_user(user_id: str, username: str = None, first_name: str = None) -> None:
+    """Register or update a user's username mapping."""
+    if not username:
+        return
+    
+    mapping = load_username_map()
+    username_lower = username.lower().lstrip("@")
+    
+    mapping[username_lower] = {
+        "user_id": str(user_id),
+        "username": username,
+        "first_name": first_name,
+        "last_seen": datetime.now(timezone.utc).isoformat()
+    }
+    
+    save_username_map(mapping)
+
+
+def get_user_id_by_username(username: str) -> Optional[str]:
+    """Look up user_id by username."""
+    mapping = load_username_map()
+    username_lower = username.lower().lstrip("@")
+    
+    if username_lower in mapping:
+        return mapping[username_lower]["user_id"]
+    return None
+
+
+def get_username_by_user_id(user_id: str) -> Optional[str]:
+    """Look up username by user_id."""
+    mapping = load_username_map()
+    user_id = str(user_id)
+    
+    for username, data in mapping.items():
+        if data["user_id"] == user_id:
+            return data.get("username", username)
+    return None
+
+
+def get_all_known_users() -> list:
+    """Get all users who have interacted with the bot."""
+    mapping = load_username_map()
+    return [
+        {
+            "user_id": data["user_id"],
+            "username": data.get("username"),
+            "first_name": data.get("first_name"),
+        }
+        for data in mapping.values()
+    ]
 
 
 # -----------------------------
@@ -139,16 +272,12 @@ def ensure_user(user_id: str) -> dict:
     user_id = str(user_id)
     
     if user_id not in state:
-        # Check if user is an admin
-        user_is_admin = is_admin(user_id)
-        
         state[user_id] = {
             "feeds": [],
             "digest_time": "08:00",
             "last_sent_date": None,
             "subscription": {
-                "tier": "pro" if user_is_admin else "free",
-                "is_admin": user_is_admin,
+                "tier": "free",
                 "stripe_customer_id": None,
                 "stripe_subscription_id": None,
                 "expires_at": None,
@@ -175,15 +304,9 @@ def ensure_user(user_id: str) -> dict:
 # -----------------------------
 
 def validate_feed_url(url: str) -> tuple[bool, str]:
-    """
-    Validate that a URL is a legitimate RSS feed URL.
-    
-    Returns:
-        (is_valid, error_message or cleaned_url)
-    """
+    """Validate that a URL is a legitimate RSS feed URL."""
     url = url.strip()
     
-    # Basic URL pattern
     url_pattern = re.compile(
         r'^https?://'
         r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'
@@ -196,7 +319,6 @@ def validate_feed_url(url: str) -> tuple[bool, str]:
     if not url_pattern.match(url):
         return False, "Invalid URL format."
     
-    # Block potentially dangerous URLs
     blocked_patterns = [
         r'localhost',
         r'127\.0\.0\.1',
@@ -212,11 +334,9 @@ def validate_feed_url(url: str) -> tuple[bool, str]:
         if re.search(pattern, url, re.IGNORECASE):
             return False, "URL not allowed for security reasons."
     
-    # Normalize Substack URLs
     if "substack.com" in url.lower() and not url.endswith("/feed"):
         url = url.rstrip("/") + "/feed"
     
-    # Ensure HTTPS for known platforms
     if any(domain in url.lower() for domain in ["substack.com", "medium.com", "ghost.io"]):
         url = re.sub(r'^http://', 'https://', url)
     
@@ -256,12 +376,9 @@ def unblock_user(user_id: str) -> None:
 # -----------------------------
 
 def check_rate_limit(user_id: str, action: str) -> tuple[bool, Optional[str]]:
-    """
-    Check if user has exceeded rate limit for an action.
-    Admins have relaxed rate limits.
-    """
-    # Admins get higher limits
-    if is_admin(user_id):
+    """Check if user has exceeded rate limit for an action."""
+    # Owner and admins bypass rate limits
+    if is_privileged(user_id):
         return True, None
     
     state = ensure_user(user_id)
@@ -306,14 +423,13 @@ def get_subscription(user_id: str) -> dict:
 
 def get_tier_limits(user_id: str) -> dict:
     """Get the limits for user's current tier."""
+    # Owner and admins always get Pro
+    if is_privileged(user_id):
+        return TIERS["pro"]
+    
     sub = get_subscription(user_id)
     tier = sub.get("tier", "free")
     
-    # Admins always get pro tier
-    if sub.get("is_admin", False) or is_admin(user_id):
-        return TIERS["pro"]
-    
-    # Check if subscription is expired
     expires_at = sub.get("expires_at")
     if expires_at and tier != "free":
         try:
@@ -329,12 +445,11 @@ def get_tier_limits(user_id: str) -> dict:
 
 def is_subscription_active(user_id: str) -> bool:
     """Check if user has an active paid subscription."""
-    sub = get_subscription(user_id)
-    
-    # Admins are always active
-    if sub.get("is_admin", False) or is_admin(user_id):
+    # Owner and admins are always active
+    if is_privileged(user_id):
         return True
     
+    sub = get_subscription(user_id)
     tier = sub.get("tier", "free")
     
     if tier == "free":
@@ -358,7 +473,7 @@ def upgrade_subscription(
     stripe_subscription_id: str,
     expires_at: str,
 ) -> bool:
-    """Upgrade user's subscription (called from Stripe webhook)."""
+    """Upgrade user's subscription."""
     if tier not in TIERS:
         return False
     
@@ -367,7 +482,6 @@ def upgrade_subscription(
     
     state[user_id]["subscription"] = {
         "tier": tier,
-        "is_admin": state[user_id]["subscription"].get("is_admin", False),
         "stripe_customer_id": stripe_customer_id,
         "stripe_subscription_id": stripe_subscription_id,
         "expires_at": expires_at,
@@ -380,20 +494,19 @@ def upgrade_subscription(
 
 
 def downgrade_to_free(user_id: str) -> None:
-    """Downgrade user to free tier (does not affect admins)."""
+    """Downgrade user to free tier."""
+    # Don't downgrade owner or admins
+    if is_privileged(user_id):
+        return
+    
     state = ensure_user(user_id)
     user_id = str(user_id)
-    
-    # Don't downgrade admins
-    if state[user_id]["subscription"].get("is_admin", False) or is_admin(user_id):
-        return
     
     state[user_id]["subscription"]["tier"] = "free"
     state[user_id]["subscription"]["expires_at"] = None
     state[user_id]["subscription"]["stripe_subscription_id"] = None
     save_state(state)
     
-    # Trim feeds to free tier limit
     max_feeds = TIERS["free"]["max_feeds"]
     if len(state[user_id]["feeds"]) > max_feeds:
         state[user_id]["feeds"] = state[user_id]["feeds"][:max_feeds]
@@ -425,13 +538,12 @@ def list_feeds(user_id: str) -> list:
 
 def add_feed(user_id: str, url: str) -> tuple[bool, str]:
     """Add a feed URL for a user."""
-    # Check rate limit (admins bypass this)
-    if not is_admin(user_id):
+    # Check rate limit (owner/admins bypass)
+    if not is_privileged(user_id):
         allowed, error = check_rate_limit(user_id, "feed_add")
         if not allowed:
             return False, error
     
-    # Validate URL
     valid, result = validate_feed_url(url)
     if not valid:
         return False, result
@@ -441,14 +553,14 @@ def add_feed(user_id: str, url: str) -> tuple[bool, str]:
     state = ensure_user(user_id)
     user_id = str(user_id)
     
-    # Check tier limits
     tier_limits = get_tier_limits(user_id)
     max_feeds = tier_limits["max_feeds"]
     
     if len(state[user_id]["feeds"]) >= max_feeds:
-        tier = get_subscription(user_id).get("tier", "free")
-        if tier == "free":
-            return False, f"Feed limit reached ({max_feeds} for free tier). Upgrade to Pro for $1/month! Use /upgrade"
+        sub = get_subscription(user_id)
+        tier = sub.get("tier", "free")
+        if tier == "free" and not is_privileged(user_id):
+            return False, f"Feed limit reached ({max_feeds} for free tier). Upgrade to Pro! /upgrade"
         else:
             return False, f"Feed limit reached ({max_feeds})."
     
@@ -544,7 +656,9 @@ def get_user_stats(user_id: str) -> dict:
     return {
         "feed_count": len(user["feeds"]),
         "tier": sub.get("tier", "free"),
-        "is_admin": sub.get("is_admin", False) or is_admin(user_id),
+        "is_owner": is_owner(user_id),
+        "is_admin": is_admin(user_id),
+        "is_privileged": is_privileged(user_id),
         "tier_limits": get_tier_limits(user_id),
         "subscription_active": is_subscription_active(user_id),
         "expires_at": sub.get("expires_at"),
@@ -552,19 +666,20 @@ def get_user_stats(user_id: str) -> dict:
 
 
 def get_all_stats() -> dict:
-    """Get overall bot statistics (for admins)."""
+    """Get overall bot statistics (for owner)."""
     state = load_state()
-    admins = load_admins()
+    config = load_config()
     
     total_users = len(state)
     total_feeds = sum(len(u.get("feeds", [])) for u in state.values())
     pro_users = sum(1 for u in state.values() if u.get("subscription", {}).get("tier") == "pro")
     free_users = total_users - pro_users
+    admin_count = len(config.get("admins", []))
     
     return {
         "total_users": total_users,
         "total_feeds": total_feeds,
         "pro_users": pro_users,
         "free_users": free_users,
-        "admin_count": len(admins),
+        "admin_count": admin_count,
     }
