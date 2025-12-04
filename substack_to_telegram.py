@@ -4,9 +4,9 @@ Substack to Telegram Digest Bot (Railway Edition)
 
 Features:
 - Admin and normal user profiles
-- Free tier (3 feeds) and Pro tier ($1/month, 50 feeds + AI summaries)
+- Free tier (3 feeds) and Pro tier (50 feeds + AI summaries)
+- Telegram Stars payment integration ($1/month = ~50 Stars)
 - 24/7 operation with Telegram webhooks
-- Scheduled daily digests
 """
 
 import os
@@ -35,8 +35,8 @@ from manage_feeds import (
     get_tier_limits,
     get_user_stats,
     get_all_stats,
+    upgrade_subscription,
     TIERS,
-    # Admin functions
     is_admin,
     add_admin,
     remove_admin,
@@ -46,7 +46,6 @@ from manage_feeds import (
 )
 
 from ai_summarizer import (
-    generate_scqr_summary,
     generate_batch_summaries,
     clean_html,
 )
@@ -60,8 +59,9 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 RAILWAY_PUBLIC_DOMAIN = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
 PORT = int(os.environ.get("PORT", 8080))
 
-# Stripe configuration
-STRIPE_PAYMENT_LINK = os.environ.get("STRIPE_PAYMENT_LINK", "")
+# Telegram Stars pricing (1 Star ≈ $0.02, so 50 Stars ≈ $1)
+PRO_PRICE_STARS = 50
+PRO_DURATION_DAYS = 30
 
 TELEGRAM_API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
@@ -97,12 +97,52 @@ def send_message(chat_id: str, text: str, html: bool = False, reply_markup: dict
         return False
 
 
+def send_invoice(chat_id: str, user_id: str) -> bool:
+    """Send a Telegram Stars invoice for Pro subscription."""
+    payload = {
+        "chat_id": chat_id,
+        "title": "Pro Subscription",
+        "description": f"Unlock Pro features for {PRO_DURATION_DAYS} days:\n• 50 feeds (vs 3)\n• AI-powered SCQR summaries\n• Priority support",
+        "payload": f"pro_subscription_{user_id}",
+        "currency": "XTR",  # XTR = Telegram Stars
+        "prices": [{"label": "Pro (30 days)", "amount": PRO_PRICE_STARS}],
+    }
+    
+    try:
+        resp = requests.post(f"{TELEGRAM_API_BASE}/sendInvoice", json=payload, timeout=30)
+        print(f"Invoice response: {resp.json()}")
+        return resp.ok
+    except requests.RequestException as e:
+        print(f"Error sending invoice: {e}")
+        return False
+
+
+def answer_pre_checkout(pre_checkout_query_id: str, ok: bool = True, error_message: str = None) -> bool:
+    """Answer a pre-checkout query."""
+    payload = {
+        "pre_checkout_query_id": pre_checkout_query_id,
+        "ok": ok,
+    }
+    if error_message:
+        payload["error_message"] = error_message
+    
+    try:
+        resp = requests.post(f"{TELEGRAM_API_BASE}/answerPreCheckoutQuery", json=payload, timeout=30)
+        return resp.ok
+    except requests.RequestException as e:
+        print(f"Error answering pre-checkout: {e}")
+        return False
+
+
 def set_webhook(url: str) -> bool:
     """Set Telegram webhook URL."""
     try:
         resp = requests.post(
             f"{TELEGRAM_API_BASE}/setWebhook",
-            json={"url": url, "allowed_updates": ["message"]},
+            json={
+                "url": url,
+                "allowed_updates": ["message", "pre_checkout_query"]
+            },
             timeout=30
         )
         print(f"Webhook set response: {resp.json()}")
@@ -198,10 +238,9 @@ def build_digest(entries: list, user_id: str) -> str:
         
         text += "\n━━━━━━━━━━━━━━━━━━━━\n\n"
     
-    # Upgrade prompt for free users
     sub = get_subscription(user_id)
     if sub.get("tier") == "free" and not sub.get("is_admin"):
-        text += "\n💡 <i>Upgrade to Pro for just $1/month to get AI summaries and 50 feeds! /upgrade</i>"
+        text += "\n💡 <i>Upgrade to Pro for AI summaries! /upgrade</i>"
     
     return text
 
@@ -211,6 +250,61 @@ def escape_html(text: str) -> str:
     if not text:
         return ""
     return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+# ---------------- PAYMENT HANDLERS ----------------
+
+def handle_pre_checkout(pre_checkout_query: dict) -> None:
+    """Handle pre-checkout query - verify and approve payment."""
+    query_id = pre_checkout_query["id"]
+    user_id = str(pre_checkout_query["from"]["id"])
+    payload = pre_checkout_query.get("invoice_payload", "")
+    
+    print(f"Pre-checkout from {user_id}: {payload}")
+    
+    # Verify the payload matches expected format
+    if payload.startswith("pro_subscription_"):
+        answer_pre_checkout(query_id, ok=True)
+    else:
+        answer_pre_checkout(query_id, ok=False, error_message="Invalid subscription")
+
+
+def handle_successful_payment(message: dict) -> None:
+    """Handle successful payment - upgrade user to Pro."""
+    chat_id = str(message["chat"]["id"])
+    user_id = str(message["from"]["id"])
+    payment = message.get("successful_payment", {})
+    
+    total_amount = payment.get("total_amount", 0)
+    currency = payment.get("currency", "")
+    payload = payment.get("invoice_payload", "")
+    
+    print(f"Payment success! User {user_id} paid {total_amount} {currency}")
+    
+    if payload.startswith("pro_subscription_"):
+        # Calculate expiry date
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=PRO_DURATION_DAYS)).isoformat()
+        
+        # Upgrade user
+        upgrade_subscription(
+            user_id=user_id,
+            tier="pro",
+            stripe_customer_id=None,
+            stripe_subscription_id=f"telegram_stars_{payment.get('telegram_payment_charge_id', '')}",
+            expires_at=expires_at,
+        )
+        
+        send_message(
+            chat_id,
+            f"🎉 <b>Welcome to Pro!</b>\n\n"
+            f"Your subscription is now active for {PRO_DURATION_DAYS} days.\n\n"
+            f"<b>You now have:</b>\n"
+            f"• Up to 50 feeds\n"
+            f"• AI-powered SCQR summaries\n"
+            f"• Priority support\n\n"
+            f"Enjoy your enhanced digests! 📚",
+            html=True,
+        )
 
 
 # ---------------- USER COMMAND HANDLERS ----------------
@@ -229,7 +323,7 @@ def handle_start(chat_id: str, user_id: str) -> None:
         "/removefeed &lt;# or url&gt; — Remove a feed\n"
         "/digest — Get your digest now\n"
         "/status — View your subscription\n"
-        "/upgrade — Upgrade to Pro ($1/month)\n"
+        "/upgrade — Upgrade to Pro (⭐50 Stars)\n"
         "/help — Show this message"
         f"{admin_note}",
         html=True,
@@ -240,7 +334,7 @@ def handle_feedlist(chat_id: str, user_id: str) -> None:
     feeds = list_feeds(user_id)
     tier_limits = get_tier_limits(user_id)
     stats = get_user_stats(user_id)
-    tier_name = "Pro 👑" if stats["is_admin"] else stats["tier"].upper()
+    tier_name = "Pro 👑" if stats["is_admin"] else ("⭐ Pro" if stats["tier"] == "pro" else "Free")
     
     if not feeds:
         send_message(
@@ -346,12 +440,14 @@ def handle_status(chat_id: str, user_id: str) -> None:
     text += f"<b>AI Summaries:</b> {'✅' if limits['ai_summaries'] else '❌'}\n"
     
     if stats.get("expires_at") and stats["tier"] == "pro" and not stats["is_admin"]:
-        text += f"<b>Renews:</b> {stats['expires_at'][:10]}\n"
+        expiry = stats["expires_at"][:10]
+        text += f"<b>Expires:</b> {expiry}\n"
     
     if stats["tier"] == "free" and not stats["is_admin"]:
-        text += f"\n<b>💡 Upgrade to Pro for just $1/month:</b>\n"
+        text += f"\n<b>💡 Upgrade to Pro:</b>\n"
         text += f"• 50 feeds (vs 3)\n"
         text += f"• AI-powered SCQR summaries\n"
+        text += f"• Only ⭐{PRO_PRICE_STARS} Stars/month\n"
         text += f"\nUse /upgrade to subscribe!"
     
     send_message(chat_id, text, html=True)
@@ -365,30 +461,32 @@ def handle_upgrade(chat_id: str, user_id: str) -> None:
         return
     
     if stats["tier"] == "pro" and stats["subscription_active"]:
-        send_message(chat_id, "⭐ You're already on the Pro plan!")
+        expiry = stats.get("expires_at", "")[:10] if stats.get("expires_at") else "N/A"
+        send_message(
+            chat_id,
+            f"⭐ You're already on Pro!\n\n"
+            f"<b>Expires:</b> {expiry}\n\n"
+            f"Use /upgrade again near expiry to renew.",
+            html=True
+        )
         return
     
-    if STRIPE_PAYMENT_LINK:
-        text = (
-            "⭐ <b>Upgrade to Pro — $1/month</b>\n\n"
-            "<b>Pro features:</b>\n"
-            "• Up to 50 feeds (vs 3 on free)\n"
-            "• AI-powered SCQR summaries\n"
-            "• Priority support\n\n"
-            f"👉 <a href=\"{STRIPE_PAYMENT_LINK}\">Click here to subscribe</a>\n\n"
-            "<i>After payment, send /status to confirm your upgrade.</i>"
-        )
-    else:
-        text = (
-            "⭐ <b>Upgrade to Pro — $1/month</b>\n\n"
-            "<b>Pro features:</b>\n"
-            "• Up to 50 feeds (vs 3 on free)\n"
-            "• AI-powered SCQR summaries\n"
-            "• Priority support\n\n"
-            "<i>Payment link coming soon! Contact admin for early access.</i>"
-        )
+    # Send payment invoice
+    send_message(
+        chat_id,
+        f"⭐ <b>Upgrade to Pro</b>\n\n"
+        f"<b>Price:</b> {PRO_PRICE_STARS} Telegram Stars (~$1)\n"
+        f"<b>Duration:</b> {PRO_DURATION_DAYS} days\n\n"
+        f"<b>Pro features:</b>\n"
+        f"• Up to 50 feeds (vs 3)\n"
+        f"• AI-powered SCQR summaries\n"
+        f"• Priority support\n\n"
+        f"Tap the button below to pay! 👇",
+        html=True,
+    )
     
-    send_message(chat_id, text, html=True)
+    # Send the actual invoice
+    send_invoice(chat_id, user_id)
 
 
 # ---------------- ADMIN COMMAND HANDLERS ----------------
@@ -408,7 +506,8 @@ def handle_admin(chat_id: str, user_id: str, args: str) -> None:
             "/admin listadmins — List all admins\n"
             "/admin block &lt;user_id&gt; &lt;reason&gt; — Block user\n"
             "/admin unblock &lt;user_id&gt; — Unblock user\n"
-            "/admin broadcast &lt;message&gt; — Message all users"
+            "/admin broadcast &lt;message&gt; — Message all users\n"
+            "/admin grant &lt;user_id&gt; &lt;days&gt; — Grant Pro to user"
         )
         send_message(chat_id, text, html=True)
         return
@@ -454,11 +553,11 @@ def handle_admin(chat_id: str, user_id: str, args: str) -> None:
             send_message(chat_id, text, html=True)
     
     elif subcommand == "block":
-        if len(subargs) < 2:
-            send_message(chat_id, "Usage: /admin block <user_id> <reason>")
+        if len(subargs) < 1:
+            send_message(chat_id, "Usage: /admin block <user_id> [reason]")
             return
         target_id = subargs[0]
-        reason = " ".join(parts[2:]) if len(parts) > 2 else "Blocked by admin"
+        reason = parts[2] if len(parts) > 2 else "Blocked by admin"
         block_user(target_id, reason)
         send_message(chat_id, f"✅ User {target_id} blocked: {reason}")
     
@@ -471,7 +570,7 @@ def handle_admin(chat_id: str, user_id: str, args: str) -> None:
         send_message(chat_id, f"✅ User {target_id} unblocked.")
     
     elif subcommand == "broadcast":
-        if not subargs:
+        if len(parts) < 2:
             send_message(chat_id, "Usage: /admin broadcast <message>")
             return
         message = " ".join(parts[1:])
@@ -482,6 +581,28 @@ def handle_admin(chat_id: str, user_id: str, args: str) -> None:
                 sent += 1
         send_message(chat_id, f"✅ Broadcast sent to {sent}/{len(users)} users.")
     
+    elif subcommand == "grant":
+        if len(subargs) < 2:
+            send_message(chat_id, "Usage: /admin grant <user_id> <days>")
+            return
+        target_id = subargs[0]
+        try:
+            days = int(subargs[1])
+        except ValueError:
+            send_message(chat_id, "Days must be a number")
+            return
+        
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+        upgrade_subscription(
+            user_id=target_id,
+            tier="pro",
+            stripe_customer_id=None,
+            stripe_subscription_id=f"admin_grant_{user_id}",
+            expires_at=expires_at,
+        )
+        send_message(chat_id, f"✅ Granted Pro to {target_id} for {days} days.")
+        send_message(target_id, f"🎁 You've been granted <b>Pro</b> for {days} days!", html=True)
+    
     else:
         send_message(chat_id, "Unknown admin command. Use /admin for help.")
 
@@ -490,6 +611,11 @@ def handle_admin(chat_id: str, user_id: str, args: str) -> None:
 
 def handle_message(message: dict) -> None:
     """Route incoming Telegram message to appropriate handler."""
+    # Check for successful payment first
+    if "successful_payment" in message:
+        handle_successful_payment(message)
+        return
+    
     chat_id = str(message["chat"]["id"])
     user_id = str(message["from"]["id"])
     text = message.get("text", "").strip()
@@ -592,8 +718,16 @@ def health():
 def telegram_webhook():
     try:
         update = request.get_json()
+        print(f"Received update: {update.get('update_id', 'N/A')}")
+        
+        # Handle pre-checkout query (payment verification)
+        if "pre_checkout_query" in update:
+            handle_pre_checkout(update["pre_checkout_query"])
+        
+        # Handle regular messages (including successful payments)
         if "message" in update:
             handle_message(update["message"])
+        
         return jsonify({"ok": True})
     except Exception as e:
         print(f"Webhook error: {e}")
