@@ -1,18 +1,18 @@
 """
 Feed Management Module for Substack Digest Bot
 
-Handles per-user feed subscriptions, subscription tiers, and security.
+Handles per-user feed subscriptions, admin/user roles, and subscription tiers.
 """
 
 import json
 import os
 import re
-import hashlib
 import time
 from datetime import datetime, timezone
 from typing import Optional
 
 STATE_FILE = "user_state.json"
+ADMIN_FILE = "admins.json"
 
 # Subscription tiers and limits
 TIERS = {
@@ -22,17 +22,11 @@ TIERS = {
         "ai_summaries": False,
         "price_monthly": 0,
     },
-    "basic": {
-        "max_feeds": 15,
-        "digest_frequency": "daily",
-        "ai_summaries": True,
-        "price_monthly": 5,  # $5/month
-    },
     "pro": {
         "max_feeds": 50,
         "digest_frequency": "custom",
         "ai_summaries": True,
-        "price_monthly": 12,  # $12/month
+        "price_monthly": 1,  # $1/month
     },
 }
 
@@ -42,6 +36,80 @@ RATE_LIMITS = {
     "feeds_add_per_hour": 20,
     "digest_requests_per_hour": 5,
 }
+
+
+# -----------------------------
+#  Admin Management
+# -----------------------------
+
+def load_admins() -> list:
+    """Load list of admin user IDs."""
+    if not os.path.exists(ADMIN_FILE):
+        return []
+    try:
+        with open(ADMIN_FILE, "r") as f:
+            data = json.load(f)
+            return data.get("admins", [])
+    except (json.JSONDecodeError, IOError):
+        return []
+
+
+def save_admins(admin_ids: list) -> None:
+    """Save list of admin user IDs."""
+    with open(ADMIN_FILE, "w") as f:
+        json.dump({"admins": admin_ids}, f, indent=2)
+
+
+def is_admin(user_id: str) -> bool:
+    """Check if a user is an admin."""
+    admins = load_admins()
+    return str(user_id) in [str(a) for a in admins]
+
+
+def add_admin(user_id: str) -> tuple[bool, str]:
+    """Add a user as admin. Returns (success, message)."""
+    admins = load_admins()
+    user_id = str(user_id)
+    
+    if user_id in [str(a) for a in admins]:
+        return False, "User is already an admin."
+    
+    admins.append(user_id)
+    save_admins(admins)
+    
+    # Upgrade admin to pro tier automatically
+    state = ensure_user(user_id)
+    state[user_id]["subscription"]["tier"] = "pro"
+    state[user_id]["subscription"]["is_admin"] = True
+    state[user_id]["subscription"]["expires_at"] = None  # Never expires for admins
+    save_state(state)
+    
+    return True, f"User {user_id} is now an admin with Pro features."
+
+
+def remove_admin(user_id: str) -> tuple[bool, str]:
+    """Remove admin status from a user."""
+    admins = load_admins()
+    user_id = str(user_id)
+    
+    if user_id not in [str(a) for a in admins]:
+        return False, "User is not an admin."
+    
+    admins = [a for a in admins if str(a) != user_id]
+    save_admins(admins)
+    
+    # Downgrade to free tier
+    state = ensure_user(user_id)
+    state[user_id]["subscription"]["tier"] = "free"
+    state[user_id]["subscription"]["is_admin"] = False
+    save_state(state)
+    
+    return True, f"User {user_id} is no longer an admin."
+
+
+def list_admins() -> list:
+    """Get list of all admin user IDs."""
+    return load_admins()
 
 
 # -----------------------------
@@ -71,12 +139,16 @@ def ensure_user(user_id: str) -> dict:
     user_id = str(user_id)
     
     if user_id not in state:
+        # Check if user is an admin
+        user_is_admin = is_admin(user_id)
+        
         state[user_id] = {
             "feeds": [],
             "digest_time": "08:00",
             "last_sent_date": None,
             "subscription": {
-                "tier": "free",
+                "tier": "pro" if user_is_admin else "free",
+                "is_admin": user_is_admin,
                 "stripe_customer_id": None,
                 "stripe_subscription_id": None,
                 "expires_at": None,
@@ -113,11 +185,11 @@ def validate_feed_url(url: str) -> tuple[bool, str]:
     
     # Basic URL pattern
     url_pattern = re.compile(
-        r'^https?://'  # http:// or https://
-        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'  # domain
-        r'localhost|'  # localhost
-        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  # or IP
-        r'(?::\d+)?'  # optional port
+        r'^https?://'
+        r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'
+        r'localhost|'
+        r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'
+        r'(?::\d+)?'
         r'(?:/?|[/?]\S+)$', re.IGNORECASE
     )
     
@@ -186,12 +258,12 @@ def unblock_user(user_id: str) -> None:
 def check_rate_limit(user_id: str, action: str) -> tuple[bool, Optional[str]]:
     """
     Check if user has exceeded rate limit for an action.
-    
-    Actions: 'command', 'feed_add', 'digest_request'
-    
-    Returns:
-        (is_allowed, error_message if not allowed)
+    Admins have relaxed rate limits.
     """
+    # Admins get higher limits
+    if is_admin(user_id):
+        return True, None
+    
     state = ensure_user(user_id)
     user_id = str(user_id)
     now = time.time()
@@ -209,14 +281,12 @@ def check_rate_limit(user_id: str, action: str) -> tuple[bool, Optional[str]]:
     rate_limits = state[user_id].get("rate_limits", {})
     timestamps = rate_limits.get(key, [])
     
-    # Filter to only timestamps within the window
     timestamps = [ts for ts in timestamps if now - ts < window_seconds]
     
     if len(timestamps) >= max_requests:
         wait_time = int(window_seconds - (now - timestamps[0]))
         return False, f"Rate limit exceeded. Try again in {wait_time} seconds."
     
-    # Record this request
     timestamps.append(now)
     state[user_id]["rate_limits"][key] = timestamps
     save_state(state)
@@ -239,13 +309,16 @@ def get_tier_limits(user_id: str) -> dict:
     sub = get_subscription(user_id)
     tier = sub.get("tier", "free")
     
+    # Admins always get pro tier
+    if sub.get("is_admin", False) or is_admin(user_id):
+        return TIERS["pro"]
+    
     # Check if subscription is expired
     expires_at = sub.get("expires_at")
     if expires_at and tier != "free":
         try:
             expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
             if datetime.now(timezone.utc) > expiry:
-                # Subscription expired, downgrade to free
                 downgrade_to_free(user_id)
                 tier = "free"
         except (ValueError, TypeError):
@@ -257,10 +330,15 @@ def get_tier_limits(user_id: str) -> dict:
 def is_subscription_active(user_id: str) -> bool:
     """Check if user has an active paid subscription."""
     sub = get_subscription(user_id)
+    
+    # Admins are always active
+    if sub.get("is_admin", False) or is_admin(user_id):
+        return True
+    
     tier = sub.get("tier", "free")
     
     if tier == "free":
-        return True  # Free is always "active"
+        return True
     
     expires_at = sub.get("expires_at")
     if not expires_at:
@@ -289,6 +367,7 @@ def upgrade_subscription(
     
     state[user_id]["subscription"] = {
         "tier": tier,
+        "is_admin": state[user_id]["subscription"].get("is_admin", False),
         "stripe_customer_id": stripe_customer_id,
         "stripe_subscription_id": stripe_subscription_id,
         "expires_at": expires_at,
@@ -301,9 +380,13 @@ def upgrade_subscription(
 
 
 def downgrade_to_free(user_id: str) -> None:
-    """Downgrade user to free tier."""
+    """Downgrade user to free tier (does not affect admins)."""
     state = ensure_user(user_id)
     user_id = str(user_id)
+    
+    # Don't downgrade admins
+    if state[user_id]["subscription"].get("is_admin", False) or is_admin(user_id):
+        return
     
     state[user_id]["subscription"]["tier"] = "free"
     state[user_id]["subscription"]["expires_at"] = None
@@ -341,23 +424,19 @@ def list_feeds(user_id: str) -> list:
 
 
 def add_feed(user_id: str, url: str) -> tuple[bool, str]:
-    """
-    Add a feed URL for a user.
-    
-    Returns:
-        (success, message) tuple
-    """
-    # Check rate limit
-    allowed, error = check_rate_limit(user_id, "feed_add")
-    if not allowed:
-        return False, error
+    """Add a feed URL for a user."""
+    # Check rate limit (admins bypass this)
+    if not is_admin(user_id):
+        allowed, error = check_rate_limit(user_id, "feed_add")
+        if not allowed:
+            return False, error
     
     # Validate URL
     valid, result = validate_feed_url(url)
     if not valid:
         return False, result
     
-    url = result  # Use the cleaned/normalized URL
+    url = result
     
     state = ensure_user(user_id)
     user_id = str(user_id)
@@ -368,7 +447,10 @@ def add_feed(user_id: str, url: str) -> tuple[bool, str]:
     
     if len(state[user_id]["feeds"]) >= max_feeds:
         tier = get_subscription(user_id).get("tier", "free")
-        return False, f"Feed limit reached ({max_feeds} for {tier} tier). Upgrade for more!"
+        if tier == "free":
+            return False, f"Feed limit reached ({max_feeds} for free tier). Upgrade to Pro for $1/month! Use /upgrade"
+        else:
+            return False, f"Feed limit reached ({max_feeds})."
     
     if url in state[user_id]["feeds"]:
         return False, "Feed already added."
@@ -379,17 +461,11 @@ def add_feed(user_id: str, url: str) -> tuple[bool, str]:
 
 
 def remove_feed(user_id: str, url_or_index: str) -> tuple[bool, str]:
-    """
-    Remove a feed by URL or 1-based index.
-    
-    Returns:
-        (success, message) tuple
-    """
+    """Remove a feed by URL or 1-based index."""
     state = ensure_user(user_id)
     user_id = str(user_id)
     feeds = state[user_id]["feeds"]
     
-    # Remove by index (1-based)
     if url_or_index.isdigit():
         idx = int(url_or_index) - 1
         if 0 <= idx < len(feeds):
@@ -398,7 +474,6 @@ def remove_feed(user_id: str, url_or_index: str) -> tuple[bool, str]:
             return True, removed
         return False, "Invalid index."
     
-    # Remove by URL
     if url_or_index in feeds:
         feeds.remove(url_or_index)
         save_state(state)
@@ -413,7 +488,6 @@ def remove_feed(user_id: str, url_or_index: str) -> tuple[bool, str]:
 
 def set_digest_time(user_id: str, time_str: str) -> bool:
     """Set preferred digest time (HH:MM format)."""
-    # Validate time format
     if not re.match(r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$', time_str):
         return False
     
@@ -470,7 +544,27 @@ def get_user_stats(user_id: str) -> dict:
     return {
         "feed_count": len(user["feeds"]),
         "tier": sub.get("tier", "free"),
+        "is_admin": sub.get("is_admin", False) or is_admin(user_id),
         "tier_limits": get_tier_limits(user_id),
         "subscription_active": is_subscription_active(user_id),
         "expires_at": sub.get("expires_at"),
+    }
+
+
+def get_all_stats() -> dict:
+    """Get overall bot statistics (for admins)."""
+    state = load_state()
+    admins = load_admins()
+    
+    total_users = len(state)
+    total_feeds = sum(len(u.get("feeds", [])) for u in state.values())
+    pro_users = sum(1 for u in state.values() if u.get("subscription", {}).get("tier") == "pro")
+    free_users = total_users - pro_users
+    
+    return {
+        "total_users": total_users,
+        "total_feeds": total_feeds,
+        "pro_users": pro_users,
+        "free_users": free_users,
+        "admin_count": len(admins),
     }
