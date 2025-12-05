@@ -22,7 +22,7 @@ OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 
 # Model configuration
 DEFAULT_MODEL = "gpt-4o-mini"
-MAX_TOKENS = 400
+MAX_TOKENS = 800  # Increased for full SCQRT with timeline
 TEMPERATURE = 0.3
 
 # Built-in summary formats

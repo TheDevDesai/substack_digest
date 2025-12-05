@@ -261,4 +261,4 @@ Pull requests welcome! Please:
 ---
 
 Made with ❤️ for newsletter enthusiasts
-# Fix bulk add
+# Remove character limits

@@ -95,9 +95,46 @@ app = Flask(__name__)
 # ---------------- TELEGRAM HELPERS ----------------
 
 def send_message(chat_id: str, text: str, html: bool = False, reply_markup: dict = None) -> bool:
-    """Send a message via Telegram Bot API."""
-    if len(text) > 4000:
-        text = text[:4000] + "\n\n... (truncated)"
+    """Send a message via Telegram Bot API. Splits long messages automatically."""
+    MAX_LENGTH = 4096  # Telegram's limit
+    
+    if len(text) <= MAX_LENGTH:
+        return _send_single_message(chat_id, text, html, reply_markup)
+    
+    # Split long messages at logical break points
+    messages = []
+    current = ""
+    
+    # Split by the separator line
+    parts = text.split("━━━━━━━━━━━━━━━━━━━━")
+    
+    for i, part in enumerate(parts):
+        separator = "━━━━━━━━━━━━━━━━━━━━" if i < len(parts) - 1 else ""
+        
+        if len(current) + len(part) + len(separator) < MAX_LENGTH - 100:
+            current += part + separator
+        else:
+            if current:
+                messages.append(current)
+            current = part + separator
+    
+    if current:
+        messages.append(current)
+    
+    # Send all parts
+    success = True
+    for msg in messages:
+        if not _send_single_message(chat_id, msg, html, reply_markup if msg == messages[-1] else None):
+            success = False
+        time.sleep(0.3)  # Small delay between messages
+    
+    return success
+
+
+def _send_single_message(chat_id: str, text: str, html: bool = False, reply_markup: dict = None) -> bool:
+    """Send a single message via Telegram Bot API."""
+    if len(text) > 4096:
+        text = text[:4090] + "\n\n..."
     
     payload = {
         "chat_id": chat_id,
