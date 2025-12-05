@@ -261,4 +261,4 @@ Pull requests welcome! Please:
 ---
 
 Made with ❤️ for newsletter enthusiasts
-# Remove character limits
+# CEO-level analysis

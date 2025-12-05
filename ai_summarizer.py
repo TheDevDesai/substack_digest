@@ -22,7 +22,7 @@ OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 
 # Model configuration
 DEFAULT_MODEL = "gpt-4o-mini"
-MAX_TOKENS = 800  # Increased for full SCQRT with timeline
+MAX_TOKENS = 1200  # Generous limit for comprehensive CEO-level analysis
 TEMPERATURE = 0.3
 
 # Built-in summary formats
@@ -31,42 +31,58 @@ SUMMARY_FORMATS = {
         "name": "SCQRT (Minto Pyramid + Timeline)",
         "description": "Situation, Complication, Question, Resolution, Timeline - based on Barbara Minto's Pyramid Principle with industry trajectory",
         "fields": ["situation", "complication", "question", "resolution", "timeline", "technical_terms"],
-        "prompt": """Analyze this article using the SCQRT framework (Barbara Minto's Pyramid Principle + Timeline analysis).
+        "prompt": """You are a highly distinguished research professor and strategic analyst known for your eloquent, incisive analysis. Your audience consists of CEOs and senior executives who value deep insights over surface-level summaries. 
 
-IMPORTANT: 
-1. Only include facts and claims DIRECTLY stated in the article content below
-2. If the article contains technical terms, jargon, or concepts that a general reader might not understand, explain them simply
-3. Lead with the answer/resolution (pyramid principle: answer first, then supporting logic)
+Analyze this article using the SCQRT framework (Barbara Minto's Pyramid Principle + Timeline analysis).
+
+YOUR APPROACH:
+1. First, deeply understand the article's core thesis, supporting evidence, and implications
+2. Extract specific numbers, percentages, data points, and concrete facts
+3. Identify the strategic implications and second-order effects
+4. Capture the author's key arguments and novel insights
+5. Be comprehensive yet precise - CEOs want substance, not fluff
 
 Article Title: {title}
 Source: {feed_name}
 Article Content: {content}
 
-Provide a summary in this exact JSON format:
+Provide your analysis in this JSON format:
+
 {{
-    "situation": "The stable context or background that the reader would agree with (1-2 sentences). This sets up what we already know.",
-    "complication": "The change, problem, or tension that disrupts the situation and creates a need for action/understanding (1-2 sentences)",
-    "question": "The logical question that arises from the complication - what the reader would naturally ask",
-    "resolution": "The KEY ANSWER or insight - state this clearly and directly as it's the most important part (2-3 sentences)",
+    "situation": "Set the strategic context. What is the established baseline or status quo that frames this discussion? Include relevant market size, growth rates, or key metrics if mentioned. (2-3 sentences)",
+    
+    "complication": "What disruption, tension, or strategic challenge has emerged? Why does this matter NOW? What are the stakes? Be specific about the forces at play. (2-3 sentences)",
+    
+    "question": "What is the critical strategic question this raises for decision-makers? Frame it as the question a CEO would ask.",
+    
+    "resolution": "The core insight and answer. What is the author's key argument or finding? Include specific data points, percentages, or evidence cited. What is the 'so what' for executives? This is the most important section - be thorough. (3-4 sentences)",
+    
     "timeline": {{
-        "current_state": "Where the industry/topic stands NOW based on the article",
-        "growth_trajectory": "How it's developing or evolving (trends, momentum, direction)",
-        "challenges": ["Key challenge or gate to further development", "Another barrier mentioned"],
-        "future_outlook": "Potential solutions or what needs to happen to overcome the gates"
+        "current_state": "Where does this industry/topic stand today? Include specific metrics, market positions, or quantitative context from the article.",
+        "growth_trajectory": "What are the key trends, growth vectors, or directional shifts? Include any projections, CAGR, or trajectory data mentioned.",
+        "challenges": ["Specific barrier or constraint with detail", "Another concrete challenge - be specific, not generic"],
+        "future_outlook": "What needs to happen next? What are the implications? Include any predictions or strategic recommendations from the article."
     }},
+    
+    "key_facts": [
+        "Specific number, statistic, or data point from the article",
+        "Another concrete fact or metric worth noting",
+        "Key name, company, or entity mentioned with context"
+    ],
+    
     "technical_terms": [
-        {{"term": "technical word or concept", "explanation": "simple plain-English explanation"}},
-        {{"term": "another term", "explanation": "simple explanation"}}
+        {{"term": "technical word or concept", "explanation": "clear explanation a non-specialist executive would appreciate"}}
     ]
 }}
 
-GUIDELINES:
-- The Resolution should be THE MAIN POINT - what someone should remember if they read nothing else
-- Situation → Complication → Question should flow logically (each triggers the next)
-- Timeline should capture the industry/topic trajectory IF discussed in the article
-- If the article doesn't discuss trajectory/challenges, use null for timeline
-- Technical terms array can be empty [] if no jargon needs explaining
-- FACT-CHECK: Every point must reference specific content from the article"""
+CRITICAL GUIDELINES:
+- Be SPECIFIC: "revenue grew 47% YoY to $2.3B" not "revenue grew significantly"
+- Be ANALYTICAL: explain WHY something matters, not just WHAT happened
+- Be SUBSTANTIVE: CEOs want insights they can act on, not generic summaries
+- PRESERVE key numbers, names, and concrete details from the article
+- If the article lacks data, note the qualitative arguments and their logical basis
+- The Resolution should be the insight someone remembers from this article
+- FACT-CHECK: Every claim must trace directly to the article content"""
     },
     
     "tldr": {

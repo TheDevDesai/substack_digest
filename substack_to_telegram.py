@@ -292,13 +292,13 @@ def build_digest(entries: list, user_id: str) -> str:
         if scqr:
             # Render based on format type
             if format_type == "scqr" or (format_type == "custom" and "situation" in scqr):
-                text += f"<b>📋 Summary:</b>\n"
+                text += f"<b>📋 Analysis:</b>\n"
                 if "situation" in scqr:
-                    text += f"<b>S:</b> {escape_html(scqr.get('situation', 'N/A'))}\n"
+                    text += f"<b>S:</b> {escape_html(scqr.get('situation', 'N/A'))}\n\n"
                 if "complication" in scqr:
-                    text += f"<b>C:</b> {escape_html(scqr.get('complication', 'N/A'))}\n"
+                    text += f"<b>C:</b> {escape_html(scqr.get('complication', 'N/A'))}\n\n"
                 if "question" in scqr:
-                    text += f"<b>Q:</b> {escape_html(scqr.get('question', 'N/A'))}\n"
+                    text += f"<b>Q:</b> {escape_html(scqr.get('question', 'N/A'))}\n\n"
                 if "resolution" in scqr:
                     text += f"<b>R:</b> {escape_html(scqr.get('resolution', 'N/A'))}\n"
                 
@@ -316,6 +316,14 @@ def build_digest(entries: list, user_id: str) -> str:
                             text += f"<b>Gates:</b> {'; '.join(challenges)}\n"
                     if timeline.get("future_outlook"):
                         text += f"<b>Path Forward:</b> {escape_html(timeline['future_outlook'])}\n"
+                
+                # Show Key Facts if present
+                key_facts = scqr.get("key_facts", [])
+                if key_facts and isinstance(key_facts, list) and len(key_facts) > 0:
+                    text += f"\n<b>📊 Key Facts:</b>\n"
+                    for fact in key_facts:
+                        if fact:
+                            text += f"• {escape_html(fact)}\n"
             elif format_type == "tldr" and "summary" in scqr:
                 text += f"<b>📋 TL;DR:</b> {escape_html(scqr.get('summary', ''))}\n"
             elif format_type == "bullets" and "takeaways" in scqr:
