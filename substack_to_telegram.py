@@ -492,7 +492,9 @@ def handle_help(chat_id: str, user_id: str) -> None:
     text += "<b>📰 Feed Management:</b>\n"
     text += "/feedlist — Show your subscribed feeds\n"
     text += "/addfeed &lt;url&gt; — Add a new feed\n"
-    text += "/removefeed &lt;#&gt; — Remove a feed by number\n\n"
+    text += "/removefeed &lt;#&gt; — Remove a feed by number\n"
+    text += "/testfeed — Check all feeds are working\n"
+    text += "/testfeed &lt;url&gt; — Test a specific feed\n\n"
     
     text += "<b>📚 Digest:</b>\n"
     text += "/digest — Get your digest now\n"
@@ -705,6 +707,111 @@ def handle_upgrade(chat_id: str, user_id: str) -> None:
 
 
 # ---------------- FORMAT COMMAND HANDLER ----------------
+
+def handle_testfeed(chat_id: str, user_id: str, args: str) -> None:
+    """Test if a feed URL is valid and can be fetched."""
+    url = args.strip()
+    
+    if not url:
+        # Test all user's feeds
+        feeds = list_feeds(user_id)
+        if not feeds:
+            send_message(chat_id, "📭 You have no feeds. Use /addfeed to add one first.")
+            return
+        
+        send_message(chat_id, f"🔍 Testing {len(feeds)} feeds...")
+        
+        results = []
+        for feed_url in feeds:
+            try:
+                parsed = feedparser.parse(feed_url)
+                if parsed.bozo and not parsed.entries:
+                    results.append(f"❌ {feed_url}\n   <i>Error: Could not parse feed</i>")
+                elif not parsed.entries:
+                    results.append(f"⚠️ {feed_url}\n   <i>Warning: No entries found</i>")
+                else:
+                    feed_title = parsed.feed.get("title", "Unknown")
+                    latest = parsed.entries[0].get("title", "No title")[:50]
+                    pub_date = ""
+                    if hasattr(parsed.entries[0], "published"):
+                        pub_date = f" ({parsed.entries[0].published[:16]})"
+                    results.append(f"✅ <b>{escape_html(feed_title)}</b>\n   Latest: {escape_html(latest)}{pub_date}")
+            except Exception as e:
+                results.append(f"❌ {feed_url}\n   <i>Error: {escape_html(str(e)[:50])}</i>")
+        
+        text = "<b>📋 Feed Status Report:</b>\n\n" + "\n\n".join(results)
+        send_message(chat_id, text, html=True)
+        return
+    
+    # Test specific URL
+    send_message(chat_id, f"🔍 Testing feed: {url}")
+    
+    # Auto-add /feed if it's a substack URL without it
+    if "substack.com" in url.lower() and not url.endswith("/feed"):
+        url = url.rstrip("/") + "/feed"
+    
+    try:
+        parsed = feedparser.parse(url)
+        
+        if parsed.bozo and not parsed.entries:
+            error_msg = str(parsed.bozo_exception)[:100] if hasattr(parsed, 'bozo_exception') else "Unknown error"
+            send_message(
+                chat_id,
+                f"❌ <b>Feed Error</b>\n\n"
+                f"URL: {url}\n"
+                f"Error: {escape_html(error_msg)}\n\n"
+                f"<i>This URL may not be a valid RSS feed.</i>",
+                html=True
+            )
+            return
+        
+        if not parsed.entries:
+            send_message(
+                chat_id,
+                f"⚠️ <b>No Entries</b>\n\n"
+                f"URL: {url}\n"
+                f"The feed was parsed but contains no entries.\n\n"
+                f"<i>The author may not have published anything yet.</i>",
+                html=True
+            )
+            return
+        
+        # Success - show feed info
+        feed_title = parsed.feed.get("title", "Unknown")
+        num_entries = len(parsed.entries)
+        
+        text = f"✅ <b>Feed Valid!</b>\n\n"
+        text += f"<b>Title:</b> {escape_html(feed_title)}\n"
+        text += f"<b>URL:</b> {url}\n"
+        text += f"<b>Entries:</b> {num_entries}\n\n"
+        
+        text += f"<b>Recent posts:</b>\n"
+        for entry in parsed.entries[:3]:
+            title = entry.get("title", "No title")[:60]
+            pub = ""
+            if hasattr(entry, "published"):
+                pub = f" <i>({entry.published[:16]})</i>"
+            text += f"• {escape_html(title)}{pub}\n"
+        
+        # Check if already added
+        feeds = list_feeds(user_id)
+        if url in feeds:
+            text += f"\n✅ <i>Already in your feed list</i>"
+        else:
+            text += f"\n➕ <i>Not in your list. Use /addfeed {url}</i>"
+        
+        send_message(chat_id, text, html=True)
+        
+    except Exception as e:
+        send_message(
+            chat_id,
+            f"❌ <b>Error Testing Feed</b>\n\n"
+            f"URL: {url}\n"
+            f"Error: {escape_html(str(e))}\n\n"
+            f"<i>Check the URL and try again.</i>",
+            html=True
+        )
+
 
 def handle_settime(chat_id: str, user_id: str, args: str) -> None:
     """Handle setting custom digest delivery time."""
@@ -1212,6 +1319,7 @@ def handle_message(message: dict) -> None:
         "/feedlist": lambda: handle_feedlist(chat_id, user_id),
         "/addfeed": lambda: handle_addfeed(chat_id, user_id, args),
         "/removefeed": lambda: handle_removefeed(chat_id, user_id, args),
+        "/testfeed": lambda: handle_testfeed(chat_id, user_id, args),
         "/digest": lambda: handle_digest(chat_id, user_id),
         "/dailydigest": lambda: handle_digest(chat_id, user_id),
         "/status": lambda: handle_status(chat_id, user_id),
