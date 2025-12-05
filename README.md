@@ -261,3 +261,4 @@ Pull requests welcome! Please:
 ---
 
 Made with ❤️ for newsletter enthusiasts
+# Fixed timedelta import
