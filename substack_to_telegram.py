@@ -961,28 +961,38 @@ def handle_owner(chat_id: str, user_id: str, args: str) -> None:
                 "https://example1.substack.com/feed\n"
                 "https://example2.substack.com/feed\n"
                 "https://example3.substack.com/feed</code>\n\n"
-                "Or paste a comma-separated list:\n"
-                "<code>/owner bulkadd url1, url2, url3</code>\n\n"
                 "<i>Tip: Use /owner exportfeeds to get your current list for backup</i>"
             )
             send_message(chat_id, text, html=True)
             return
         
-        # Parse feeds from input - handle both newlines and commas
+        # Parse feeds from input - handle newlines, commas, and spaces
         feed_input = parts[1]
-        if ',' in feed_input and '\n' not in feed_input:
-            # Comma-separated
-            feed_urls = [url.strip() for url in feed_input.split(',')]
-        else:
-            # Newline-separated
-            feed_urls = [url.strip() for url in feed_input.split('\n')]
         
-        # Filter out empty lines
-        feed_urls = [url for url in feed_urls if url and url.startswith('http')]
+        # Replace commas with newlines, then split
+        feed_input = feed_input.replace(',', '\n')
+        
+        # Split by newlines and whitespace
+        import re
+        feed_urls = re.split(r'[\n\s]+', feed_input)
+        
+        # Filter to only valid URLs
+        feed_urls = [url.strip() for url in feed_urls if url.strip().startswith('http')]
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_urls = []
+        for url in feed_urls:
+            if url not in seen:
+                seen.add(url)
+                unique_urls.append(url)
+        feed_urls = unique_urls
         
         if not feed_urls:
             send_message(chat_id, "⚠️ No valid URLs found. URLs must start with http:// or https://")
             return
+        
+        send_message(chat_id, f"⏳ Adding {len(feed_urls)} feeds...")
         
         added = []
         failed = []
@@ -990,13 +1000,18 @@ def handle_owner(chat_id: str, user_id: str, args: str) -> None:
         for url in feed_urls:
             success, msg = add_feed(user_id, url)
             if success:
-                added.append(url)
+                added.append(msg)  # msg contains the cleaned URL
             else:
                 failed.append(f"{url}: {msg}")
         
         text = f"<b>📰 Bulk Add Results</b>\n\n"
         text += f"✅ Added: {len(added)}\n"
         text += f"❌ Failed: {len(failed)}\n"
+        
+        if added and len(added) <= 10:
+            text += f"\n<b>Added:</b>\n"
+            for a in added:
+                text += f"• {escape_html(a)}\n"
         
         if failed and len(failed) <= 5:
             text += f"\n<b>Failed:</b>\n"
