@@ -836,6 +836,10 @@ def handle_owner(chat_id: str, user_id: str, args: str) -> None:
             "/owner block &lt;@user&gt; &lt;reason&gt; — Block user\n"
             "/owner unblock &lt;@user&gt; — Unblock user\n\n"
             
+            "<b>📰 Feed Management:</b>\n"
+            "/owner bulkadd — Bulk add feeds (one per line)\n"
+            "/owner exportfeeds — Export your feeds list\n\n"
+            
             "<b>📊 Analytics:</b>\n"
             "/owner stats — Full analytics dashboard\n"
             "/owner payments — Recent payments\n\n"
@@ -947,6 +951,74 @@ def handle_owner(chat_id: str, user_id: str, args: str) -> None:
                 amount = p.get('amount', 0)
                 lines.append(f"• {username}: ⭐{amount} ({timestamp})")
             send_message(chat_id, "\n".join(lines), html=True)
+    
+    elif subcommand == "bulkadd":
+        if len(parts) < 2:
+            text = (
+                "<b>📰 Bulk Add Feeds</b>\n\n"
+                "Add multiple feeds at once. Send:\n\n"
+                "<code>/owner bulkadd\n"
+                "https://example1.substack.com/feed\n"
+                "https://example2.substack.com/feed\n"
+                "https://example3.substack.com/feed</code>\n\n"
+                "Or paste a comma-separated list:\n"
+                "<code>/owner bulkadd url1, url2, url3</code>\n\n"
+                "<i>Tip: Use /owner exportfeeds to get your current list for backup</i>"
+            )
+            send_message(chat_id, text, html=True)
+            return
+        
+        # Parse feeds from input - handle both newlines and commas
+        feed_input = parts[1]
+        if ',' in feed_input and '\n' not in feed_input:
+            # Comma-separated
+            feed_urls = [url.strip() for url in feed_input.split(',')]
+        else:
+            # Newline-separated
+            feed_urls = [url.strip() for url in feed_input.split('\n')]
+        
+        # Filter out empty lines
+        feed_urls = [url for url in feed_urls if url and url.startswith('http')]
+        
+        if not feed_urls:
+            send_message(chat_id, "⚠️ No valid URLs found. URLs must start with http:// or https://")
+            return
+        
+        added = []
+        failed = []
+        
+        for url in feed_urls:
+            success, msg = add_feed(user_id, url)
+            if success:
+                added.append(url)
+            else:
+                failed.append(f"{url}: {msg}")
+        
+        text = f"<b>📰 Bulk Add Results</b>\n\n"
+        text += f"✅ Added: {len(added)}\n"
+        text += f"❌ Failed: {len(failed)}\n"
+        
+        if failed and len(failed) <= 5:
+            text += f"\n<b>Failed:</b>\n"
+            for f in failed:
+                text += f"• {escape_html(f)}\n"
+        
+        send_message(chat_id, text, html=True)
+    
+    elif subcommand == "exportfeeds":
+        feeds = list_feeds(user_id)
+        if not feeds:
+            send_message(chat_id, "📭 You have no feeds to export.")
+            return
+        
+        text = "<b>📰 Your Feeds (copy for backup):</b>\n\n"
+        text += "<code>"
+        text += "\n".join(feeds)
+        text += "</code>\n\n"
+        text += f"<i>Total: {len(feeds)} feeds</i>\n\n"
+        text += "<i>To restore after deployment, use:\n/owner bulkadd [paste feeds]</i>"
+        
+        send_message(chat_id, text, html=True)
     
     elif subcommand == "block":
         if len(subargs) < 1:

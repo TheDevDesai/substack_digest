@@ -261,4 +261,4 @@ Pull requests welcome! Please:
 ---
 
 Made with ❤️ for newsletter enthusiasts
-# Custom digest time
+# Bulk feed commands
