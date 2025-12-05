@@ -261,4 +261,4 @@ Pull requests welcome! Please:
 ---
 
 Made with ❤️ for newsletter enthusiasts
-# CEO-level analysis
+# 3 day lookback

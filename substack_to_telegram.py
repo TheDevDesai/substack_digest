@@ -85,7 +85,7 @@ PRO_DURATION_DAYS = 30
 
 TELEGRAM_API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-LOOKBACK_HOURS = 24
+LOOKBACK_HOURS = 72  # 3 days
 DIGEST_HOUR_UTC = 0
 DIGEST_MINUTE_UTC = 0
 
@@ -268,7 +268,7 @@ def build_digest(entries: list, user_id: str) -> str:
     # Get user's preferred format
     format_type, custom_prompt = get_summary_format(user_id)
     
-    text = f"📚 <b>Daily Digest</b> — {len(entries)} new post(s)\n"
+    text = f"📚 <b>Daily Digest</b> — {len(entries)} new post(s) from last 3 days\n"
     text += f"━━━━━━━━━━━━━━━━━━━━\n\n"
     
     if use_ai_summaries:
