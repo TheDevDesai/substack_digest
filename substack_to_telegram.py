@@ -315,13 +315,19 @@ def build_digest(entries: list, user_id: str) -> str:
                 for term_obj in tech_terms:
                     if isinstance(term_obj, dict) and "term" in term_obj:
                         term_strs.append(f"<i>{escape_html(term_obj['term'])}</i>: {escape_html(term_obj.get('explanation', ''))}")
-                text += " | ".join(term_strs) + "\n"
+                if term_strs:
+                    text += " | ".join(term_strs) + "\n"
         else:
+            # No AI summary - show preview (for free users or if AI failed)
             summary = clean_html(entry.get("summary", ""))
             if summary:
-                if len(summary) > 200:
-                    summary = summary[:197] + "..."
-                text += f"<i>{summary}</i>\n"
+                if len(summary) > 300:
+                    summary = summary[:297] + "..."
+                text += f"<i>{escape_html(summary)}</i>\n"
+            
+            # If Pro user but no summary, note the issue
+            if use_ai_summaries:
+                text += f"<i>(Summary unavailable)</i>\n"
         
         text += "\n━━━━━━━━━━━━━━━━━━━━\n\n"
     
@@ -445,6 +451,7 @@ def handle_help(chat_id: str, user_id: str) -> None:
     
     text += "<b>📚 Digest:</b>\n"
     text += "/digest — Get your digest now\n"
+    text += "/settime HH:MM — Set daily digest time\n"
     
     # Show format command for Pro users
     tier_limits = get_tier_limits(user_id)
@@ -577,6 +584,10 @@ def handle_status(chat_id: str, user_id: str) -> None:
     stats = get_user_stats(user_id)
     limits = stats["tier_limits"]
     
+    from manage_feeds import get_digest_time, get_summary_format
+    digest_time = get_digest_time(user_id)
+    summary_format, _ = get_summary_format(user_id)
+    
     if stats["is_owner"]:
         tier_display = "👑 Owner"
     elif stats["is_admin"]:
@@ -592,6 +603,10 @@ def handle_status(chat_id: str, user_id: str) -> None:
     text += f"<b>Plan:</b> {tier_display}\n"
     text += f"<b>Feeds:</b> {stats['feed_count']}/{limits['max_feeds']}\n"
     text += f"<b>AI Summaries:</b> {'✅' if limits['ai_summaries'] else '❌'}\n"
+    text += f"<b>Digest Time:</b> {digest_time}\n"
+    
+    if limits['ai_summaries']:
+        text += f"<b>Summary Format:</b> {summary_format.upper()}\n"
     
     if stats.get("expires_at") and stats["tier"] == "pro" and not stats["is_privileged"]:
         expiry = stats["expires_at"][:10]
@@ -645,6 +660,56 @@ def handle_upgrade(chat_id: str, user_id: str) -> None:
 
 
 # ---------------- FORMAT COMMAND HANDLER ----------------
+
+def handle_settime(chat_id: str, user_id: str, args: str) -> None:
+    """Handle setting custom digest delivery time."""
+    from manage_feeds import set_digest_time, get_digest_time
+    
+    if not args:
+        current_time = get_digest_time(user_id)
+        send_message(
+            chat_id,
+            f"⏰ <b>Digest Delivery Time</b>\n\n"
+            f"<b>Current time:</b> {current_time} (your local time)\n\n"
+            f"<b>To change:</b>\n"
+            f"/settime HH:MM\n\n"
+            f"<b>Examples:</b>\n"
+            f"/settime 08:00 — Morning digest\n"
+            f"/settime 18:30 — Evening digest\n"
+            f"/settime 22:00 — Night digest\n\n"
+            f"<i>Use 24-hour format (00:00 to 23:59)</i>",
+            html=True
+        )
+        return
+    
+    time_str = args.strip()
+    
+    # Validate time format
+    import re
+    if not re.match(r'^([01]?[0-9]|2[0-3]):([0-5][0-9])$', time_str):
+        send_message(
+            chat_id,
+            "⚠️ Invalid time format.\n\n"
+            "Use 24-hour format: HH:MM\n"
+            "Examples: 08:00, 14:30, 22:00",
+            html=True
+        )
+        return
+    
+    # Normalize to HH:MM format
+    parts = time_str.split(':')
+    time_str = f"{int(parts[0]):02d}:{parts[1]}"
+    
+    if set_digest_time(user_id, time_str):
+        send_message(
+            chat_id,
+            f"✅ Digest time set to <b>{time_str}</b>\n\n"
+            f"You'll receive your daily digest at this time.",
+            html=True
+        )
+    else:
+        send_message(chat_id, "⚠️ Failed to set time. Please try again.")
+
 
 def handle_format(chat_id: str, user_id: str, args: str) -> None:
     """Handle summary format preferences."""
@@ -1020,6 +1085,7 @@ def handle_message(message: dict) -> None:
         "/status": lambda: handle_status(chat_id, user_id),
         "/upgrade": lambda: handle_upgrade(chat_id, user_id),
         "/format": lambda: handle_format(chat_id, user_id, args),
+        "/settime": lambda: handle_settime(chat_id, user_id, args),
         "/owner": lambda: handle_owner(chat_id, user_id, args),
     }
     
@@ -1033,20 +1099,41 @@ def handle_message(message: dict) -> None:
 # ---------------- SCHEDULED DIGEST ----------------
 
 def send_scheduled_digests():
-    """Send daily digest to all users."""
-    print(f"[{datetime.now(timezone.utc)}] Running scheduled digest...")
+    """Send daily digest to users whose scheduled time has arrived."""
+    now = datetime.now(timezone.utc)
+    current_hour = now.hour
+    current_minute = now.minute
+    
+    print(f"[{now}] Checking scheduled digests (UTC {current_hour:02d}:{current_minute:02d})...")
     
     users = get_all_users()
     if not users and TELEGRAM_CHAT_ID:
         users = [TELEGRAM_CHAT_ID]
     
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    since = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
+    today = now.strftime("%Y-%m-%d")
+    since = now - timedelta(hours=LOOKBACK_HOURS)
     
     for user_id in users:
         try:
+            # Check if already sent today
             last_sent = get_last_sent_date(user_id)
             if last_sent == today:
+                continue
+            
+            # Get user's preferred time
+            from manage_feeds import get_digest_time
+            user_time = get_digest_time(user_id)  # Returns "HH:MM"
+            
+            try:
+                user_hour, user_minute = map(int, user_time.split(':'))
+            except:
+                user_hour, user_minute = 8, 0  # Default to 08:00
+            
+            # Check if it's time to send (within 30-minute window)
+            # Convert user's local time preference to a check window
+            if current_hour != user_hour:
+                continue
+            if abs(current_minute - user_minute) > 30:
                 continue
             
             feeds = list_feeds(user_id)
@@ -1058,15 +1145,16 @@ def send_scheduled_digests():
             
             if send_message(user_id, digest, html=True):
                 set_last_sent_date(user_id, today)
-                print(f"Digest sent to {user_id}")
+                print(f"Digest sent to {user_id} at their scheduled time {user_time}")
         except Exception as e:
             print(f"Error sending digest to {user_id}: {e}")
 
 
 def run_scheduler():
     """Run the scheduler in a background thread."""
-    schedule.every().day.at(f"{DIGEST_HOUR_UTC:02d}:{DIGEST_MINUTE_UTC:02d}").do(send_scheduled_digests)
-    print(f"Scheduler started. Digest at {DIGEST_HOUR_UTC:02d}:{DIGEST_MINUTE_UTC:02d} UTC")
+    # Check every 15 minutes instead of once daily
+    schedule.every(15).minutes.do(send_scheduled_digests)
+    print(f"Scheduler started. Checking for digest delivery every 15 minutes.")
     
     while True:
         schedule.run_pending()
