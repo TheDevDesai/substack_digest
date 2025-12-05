@@ -277,6 +277,8 @@ def ensure_user(user_id: str) -> dict:
             "feeds": [],
             "digest_time": "08:00",
             "last_sent_date": None,
+            "summary_format": "scqr",  # Default format
+            "custom_prompt": None,  # For custom summary format
             "subscription": {
                 "tier": "free",
                 "stripe_customer_id": None,
@@ -614,6 +616,42 @@ def get_digest_time(user_id: str) -> str:
     """Get preferred digest time for a user."""
     state = ensure_user(user_id)
     return state[str(user_id)]["digest_time"]
+
+
+def get_summary_format(user_id: str) -> tuple[str, Optional[str]]:
+    """Get user's preferred summary format and custom prompt if any."""
+    state = ensure_user(user_id)
+    user = state[str(user_id)]
+    return user.get("summary_format", "scqr"), user.get("custom_prompt")
+
+
+def set_summary_format(user_id: str, format_type: str) -> bool:
+    """Set user's preferred summary format."""
+    valid_formats = ["scqr", "tldr", "bullets", "eli5", "actionable", "custom"]
+    if format_type not in valid_formats:
+        return False
+    
+    state = ensure_user(user_id)
+    state[str(user_id)]["summary_format"] = format_type
+    save_state(state)
+    return True
+
+
+def set_custom_prompt(user_id: str, prompt: str) -> bool:
+    """Set user's custom summary prompt."""
+    state = ensure_user(user_id)
+    state[str(user_id)]["custom_prompt"] = prompt
+    state[str(user_id)]["summary_format"] = "custom"
+    save_state(state)
+    return True
+
+
+def clear_custom_prompt(user_id: str) -> None:
+    """Clear user's custom prompt and reset to default format."""
+    state = ensure_user(user_id)
+    state[str(user_id)]["custom_prompt"] = None
+    state[str(user_id)]["summary_format"] = "scqr"
+    save_state(state)
 
 
 def get_last_sent_date(user_id: str) -> Optional[str]:

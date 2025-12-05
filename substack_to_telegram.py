@@ -55,11 +55,19 @@ from manage_feeds import (
     record_event,
     get_recent_payments,
     get_payment_stats_by_period,
+    # Summary format functions
+    get_summary_format,
+    set_summary_format,
+    set_custom_prompt,
+    clear_custom_prompt,
 )
 
 from ai_summarizer import (
     generate_batch_summaries,
     clean_html,
+    get_available_formats,
+    validate_custom_prompt,
+    SUMMARY_FORMATS,
 )
 
 
@@ -213,18 +221,26 @@ def fetch_entries_for_user(user_id: str, since: datetime) -> list:
 # ---------------- DIGEST BUILDER ----------------
 
 def build_digest(entries: list, user_id: str) -> str:
-    """Build a formatted daily digest message with SCQR summaries."""
+    """Build a formatted daily digest message with summaries in user's preferred format."""
     if not entries:
         return "📭 <b>No new posts</b> in the last 24 hours."
     
     tier_limits = get_tier_limits(user_id)
     use_ai_summaries = tier_limits.get("ai_summaries", False) and OPENAI_API_KEY
     
+    # Get user's preferred format
+    format_type, custom_prompt = get_summary_format(user_id)
+    
     text = f"📚 <b>Daily Digest</b> — {len(entries)} new post(s)\n"
     text += f"━━━━━━━━━━━━━━━━━━━━\n\n"
     
     if use_ai_summaries:
-        entries = generate_batch_summaries(entries, max_articles=10)
+        entries = generate_batch_summaries(
+            entries, 
+            max_articles=10,
+            format_type=format_type,
+            custom_prompt=custom_prompt,
+        )
     
     for i, entry in enumerate(entries, start=1):
         pub_date = entry["published"].strftime("%b %d, %H:%M")
@@ -237,11 +253,69 @@ def build_digest(entries: list, user_id: str) -> str:
         
         scqr = entry.get("scqr")
         if scqr:
-            text += f"<b>📋 SCQR Summary:</b>\n"
-            text += f"<b>S:</b> {escape_html(scqr.get('situation', 'N/A'))}\n"
-            text += f"<b>C:</b> {escape_html(scqr.get('complication', 'N/A'))}\n"
-            text += f"<b>Q:</b> {escape_html(scqr.get('question', 'N/A'))}\n"
-            text += f"<b>R:</b> {escape_html(scqr.get('resolution', 'N/A'))}\n"
+            # Render based on format type
+            if format_type == "scqr" or (format_type == "custom" and "situation" in scqr):
+                text += f"<b>📋 Summary:</b>\n"
+                if "situation" in scqr:
+                    text += f"<b>S:</b> {escape_html(scqr.get('situation', 'N/A'))}\n"
+                if "complication" in scqr:
+                    text += f"<b>C:</b> {escape_html(scqr.get('complication', 'N/A'))}\n"
+                if "question" in scqr:
+                    text += f"<b>Q:</b> {escape_html(scqr.get('question', 'N/A'))}\n"
+                if "resolution" in scqr:
+                    text += f"<b>R:</b> {escape_html(scqr.get('resolution', 'N/A'))}\n"
+                
+                # Show Timeline if present
+                timeline = scqr.get("timeline")
+                if timeline and isinstance(timeline, dict):
+                    text += f"\n<b>📈 T (Timeline):</b>\n"
+                    if timeline.get("current_state"):
+                        text += f"<b>Now:</b> {escape_html(timeline['current_state'])}\n"
+                    if timeline.get("growth_trajectory"):
+                        text += f"<b>Trend:</b> {escape_html(timeline['growth_trajectory'])}\n"
+                    if timeline.get("challenges") and isinstance(timeline["challenges"], list):
+                        challenges = [escape_html(c) for c in timeline["challenges"] if c]
+                        if challenges:
+                            text += f"<b>Gates:</b> {'; '.join(challenges)}\n"
+                    if timeline.get("future_outlook"):
+                        text += f"<b>Path Forward:</b> {escape_html(timeline['future_outlook'])}\n"
+            elif format_type == "tldr" and "summary" in scqr:
+                text += f"<b>📋 TL;DR:</b> {escape_html(scqr.get('summary', ''))}\n"
+            elif format_type == "bullets" and "takeaways" in scqr:
+                text += f"<b>📋 Key Takeaways:</b>\n"
+                for takeaway in scqr.get("takeaways", []):
+                    text += f"• {escape_html(takeaway)}\n"
+            elif format_type == "eli5" and "explanation" in scqr:
+                text += f"<b>📋 ELI5:</b> {escape_html(scqr.get('explanation', ''))}\n"
+            elif format_type == "actionable":
+                if "lesson" in scqr:
+                    text += f"<b>📋 Lesson:</b> {escape_html(scqr.get('lesson', ''))}\n"
+                if "actions" in scqr:
+                    text += f"<b>Actions:</b>\n"
+                    for action in scqr.get("actions", []):
+                        text += f"• {escape_html(action)}\n"
+            else:
+                # Generic rendering for custom formats
+                text += f"<b>📋 Summary:</b>\n"
+                for key, value in scqr.items():
+                    if key == "technical_terms":
+                        continue  # Handle separately below
+                    if isinstance(value, list):
+                        text += f"<b>{key.title()}:</b>\n"
+                        for item in value:
+                            text += f"• {escape_html(str(item))}\n"
+                    else:
+                        text += f"<b>{key.title()}:</b> {escape_html(str(value))}\n"
+            
+            # Show technical terms if present
+            tech_terms = scqr.get("technical_terms", [])
+            if tech_terms and isinstance(tech_terms, list) and len(tech_terms) > 0:
+                text += f"\n<b>📖 Terms:</b> "
+                term_strs = []
+                for term_obj in tech_terms:
+                    if isinstance(term_obj, dict) and "term" in term_obj:
+                        term_strs.append(f"<i>{escape_html(term_obj['term'])}</i>: {escape_html(term_obj.get('explanation', ''))}")
+                text += " | ".join(term_strs) + "\n"
         else:
             summary = clean_html(entry.get("summary", ""))
             if summary:
@@ -370,9 +444,14 @@ def handle_help(chat_id: str, user_id: str) -> None:
     text += "/removefeed &lt;#&gt; — Remove a feed by number\n\n"
     
     text += "<b>📚 Digest:</b>\n"
-    text += "/digest — Get your digest now\n\n"
+    text += "/digest — Get your digest now\n"
     
-    text += "<b>👤 Account:</b>\n"
+    # Show format command for Pro users
+    tier_limits = get_tier_limits(user_id)
+    if tier_limits.get("ai_summaries", False):
+        text += "/format — Customize summary format\n"
+    
+    text += "\n<b>👤 Account:</b>\n"
     text += "/status — View your subscription\n"
     
     # Show upgrade only for non-privileged users
@@ -563,6 +642,110 @@ def handle_upgrade(chat_id: str, user_id: str) -> None:
     )
     
     send_invoice(chat_id, user_id)
+
+
+# ---------------- FORMAT COMMAND HANDLER ----------------
+
+def handle_format(chat_id: str, user_id: str, args: str) -> None:
+    """Handle summary format preferences."""
+    # Check if user has Pro access
+    tier_limits = get_tier_limits(user_id)
+    if not tier_limits.get("ai_summaries", False):
+        send_message(
+            chat_id,
+            "⚠️ Summary formats are a Pro feature.\n\n"
+            "Upgrade to Pro to customize your summaries! /upgrade",
+            html=True
+        )
+        return
+    
+    if not args:
+        # Show current format and available options
+        current_format, custom_prompt = get_summary_format(user_id)
+        
+        text = "<b>📝 Summary Format Settings</b>\n\n"
+        text += f"<b>Current format:</b> {current_format.upper()}\n\n"
+        text += "<b>Available formats:</b>\n"
+        text += "• <code>scqr</code> — Situation, Complication, Question, Resolution\n"
+        text += "• <code>tldr</code> — Brief 2-3 sentence summary\n"
+        text += "• <code>bullets</code> — Key takeaways as bullet points\n"
+        text += "• <code>eli5</code> — Simple explanation anyone can understand\n"
+        text += "• <code>actionable</code> — Actions and lessons to apply\n\n"
+        text += "<b>Commands:</b>\n"
+        text += "/format &lt;name&gt; — Set format (e.g., /format tldr)\n"
+        text += "/format custom &lt;prompt&gt; — Set custom format\n"
+        text += "/format reset — Reset to default (SCQR)\n"
+        
+        if custom_prompt:
+            text += f"\n\n<b>Your custom prompt:</b>\n<i>{escape_html(custom_prompt[:100])}...</i>"
+        
+        send_message(chat_id, text, html=True)
+        return
+    
+    parts = args.split(maxsplit=1)
+    subcommand = parts[0].lower()
+    
+    if subcommand == "reset":
+        clear_custom_prompt(user_id)
+        send_message(chat_id, "✅ Reset to default SCQR format.")
+        return
+    
+    if subcommand == "custom":
+        if len(parts) < 2:
+            text = (
+                "<b>📝 Custom Format</b>\n\n"
+                "Create your own summary format!\n\n"
+                "<b>Usage:</b>\n"
+                "<code>/format custom Your prompt here...</code>\n\n"
+                "<b>Example:</b>\n"
+                "<code>/format custom Summarize this article as if you're explaining it to a busy CEO. "
+                "Focus on: 1) The main point 2) Why it matters 3) What to do about it. "
+                "Respond in JSON with keys: main_point, why_it_matters, action</code>\n\n"
+                "<b>Tips:</b>\n"
+                "• Ask for JSON output with specific keys\n"
+                "• Use {title}, {content}, {feed_name} placeholders\n"
+                "• Be specific about what you want"
+            )
+            send_message(chat_id, text, html=True)
+            return
+        
+        custom_prompt = parts[1]
+        valid, result = validate_custom_prompt(custom_prompt)
+        
+        if not valid:
+            send_message(chat_id, f"⚠️ {result}")
+            return
+        
+        set_custom_prompt(user_id, result)
+        send_message(
+            chat_id,
+            "✅ Custom format saved!\n\n"
+            "Your next digest will use this format.\n"
+            "Use /digest to test it now.",
+            html=True
+        )
+        return
+    
+    # Set a built-in format
+    valid_formats = ["scqr", "tldr", "bullets", "eli5", "actionable"]
+    if subcommand in valid_formats:
+        set_summary_format(user_id, subcommand)
+        format_info = SUMMARY_FORMATS[subcommand]
+        send_message(
+            chat_id,
+            f"✅ Format set to <b>{format_info['name']}</b>\n\n"
+            f"<i>{format_info['description']}</i>\n\n"
+            f"Use /digest to see your new format!",
+            html=True
+        )
+    else:
+        send_message(
+            chat_id,
+            f"⚠️ Unknown format: {subcommand}\n\n"
+            f"Available: scqr, tldr, bullets, eli5, actionable\n"
+            f"Or use: /format custom <your prompt>",
+            html=True
+        )
 
 
 # ---------------- OWNER COMMAND HANDLERS ----------------
@@ -836,6 +1019,7 @@ def handle_message(message: dict) -> None:
         "/dailydigest": lambda: handle_digest(chat_id, user_id),
         "/status": lambda: handle_status(chat_id, user_id),
         "/upgrade": lambda: handle_upgrade(chat_id, user_id),
+        "/format": lambda: handle_format(chat_id, user_id, args),
         "/owner": lambda: handle_owner(chat_id, user_id, args),
     }
     
