@@ -277,6 +277,7 @@ def ensure_user(user_id: str) -> dict:
             "feeds": [],
             "digest_time": "08:00",
             "last_sent_date": None,
+            "seen_articles": [],  # Track article URLs already sent
             "summary_format": "scqr",  # Default format
             "custom_prompt": None,  # For custom summary format
             "subscription": {
@@ -372,6 +373,51 @@ def unblock_user(user_id: str) -> None:
     state[str(user_id)]["security"]["block_reason"] = None
     state[str(user_id)]["security"]["failed_attempts"] = 0
     save_state(state)
+
+
+# -----------------------------
+#  Seen Articles Tracking
+# -----------------------------
+
+def get_seen_articles(user_id: str) -> set:
+    """Get set of article URLs user has already seen."""
+    state = ensure_user(user_id)
+    user_id = str(user_id)
+    seen = state[user_id].get("seen_articles", [])
+    return set(seen)
+
+
+def mark_articles_seen(user_id: str, article_urls: list) -> None:
+    """Mark articles as seen by user. Keeps last 500 to limit storage."""
+    state = load_state()
+    user_id = str(user_id)
+    
+    if user_id not in state:
+        state[user_id] = ensure_user(user_id)[user_id]
+    
+    seen = state[user_id].get("seen_articles", [])
+    
+    # Add new URLs
+    for url in article_urls:
+        if url not in seen:
+            seen.append(url)
+    
+    # Keep only last 500 to prevent unbounded growth
+    if len(seen) > 500:
+        seen = seen[-500:]
+    
+    state[user_id]["seen_articles"] = seen
+    save_state(state)
+
+
+def clear_seen_articles(user_id: str) -> None:
+    """Clear user's seen articles history."""
+    state = load_state()
+    user_id = str(user_id)
+    
+    if user_id in state:
+        state[user_id]["seen_articles"] = []
+        save_state(state)
 
 
 # -----------------------------

@@ -85,7 +85,7 @@ PRO_DURATION_DAYS = 30
 
 TELEGRAM_API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-LOOKBACK_HOURS = 72  # 3 days
+LOOKBACK_HOURS = 48  # 2 days
 DIGEST_HOUR_UTC = 0
 DIGEST_MINUTE_UTC = 0
 
@@ -268,7 +268,7 @@ def build_digest(entries: list, user_id: str) -> str:
     # Get user's preferred format
     format_type, custom_prompt = get_summary_format(user_id)
     
-    text = f"📚 <b>Daily Digest</b> — {len(entries)} new post(s) from last 3 days\n"
+    text = f"📚 <b>Daily Digest</b> — {len(entries)} new post(s) from last 2 days\n"
     text += f"━━━━━━━━━━━━━━━━━━━━\n\n"
     
     if use_ai_summaries:
@@ -633,7 +633,27 @@ def handle_digest(chat_id: str, user_id: str) -> None:
         
         since = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
         entries = fetch_entries_for_user(user_id, since)
-        digest = build_digest(entries, user_id)
+        
+        # Filter out articles user has already seen
+        from manage_feeds import get_seen_articles, mark_articles_seen
+        seen_articles = get_seen_articles(user_id)
+        new_entries = [e for e in entries if e.get("link") not in seen_articles]
+        
+        if not new_entries and entries:
+            send_message(
+                chat_id,
+                "📭 <b>No new posts</b> since your last digest.\n\n"
+                f"<i>({len(entries)} post(s) from last 2 days already sent)</i>",
+                html=True,
+            )
+            return
+        
+        digest = build_digest(new_entries, user_id)
+        
+        # Mark these articles as seen
+        article_urls = [e.get("link") for e in new_entries if e.get("link")]
+        if article_urls:
+            mark_articles_seen(user_id, article_urls)
         
         send_message(chat_id, digest, html=True)
     finally:
@@ -1004,7 +1024,8 @@ def handle_owner(chat_id: str, user_id: str, args: str) -> None:
             
             "<b>📰 Feed Management:</b>\n"
             "/owner bulkadd — Bulk add feeds (one per line)\n"
-            "/owner exportfeeds — Export your feeds list\n\n"
+            "/owner exportfeeds — Export your feeds list\n"
+            "/owner clearhistory — Reset seen articles (show all again)\n\n"
             
             "<b>📊 Analytics:</b>\n"
             "/owner stats — Full analytics dashboard\n"
@@ -1200,6 +1221,17 @@ def handle_owner(chat_id: str, user_id: str, args: str) -> None:
         text += "<i>To restore after deployment, use:\n/owner bulkadd [paste feeds]</i>"
         
         send_message(chat_id, text, html=True)
+    
+    elif subcommand == "clearhistory":
+        from manage_feeds import clear_seen_articles
+        clear_seen_articles(user_id)
+        send_message(
+            chat_id,
+            "✅ <b>Article history cleared!</b>\n\n"
+            "Your next /digest will show all articles from the last 2 days, "
+            "including ones you've already seen.",
+            html=True
+        )
     
     elif subcommand == "block":
         if len(subargs) < 1:
@@ -1403,12 +1435,28 @@ def send_scheduled_digests():
             print(f"[Scheduler] Sending digest to {user_id}...")
             
             entries = fetch_entries_for_user(user_id, since)
-            digest = build_digest(entries, user_id)
+            
+            # Filter out articles user has already seen
+            from manage_feeds import get_seen_articles, mark_articles_seen
+            seen_articles = get_seen_articles(user_id)
+            new_entries = [e for e in entries if e.get("link") not in seen_articles]
+            
+            if not new_entries:
+                print(f"[Scheduler] No new articles for {user_id}, skipping")
+                set_last_sent_date(user_id, today)  # Still mark as sent today
+                continue
+            
+            digest = build_digest(new_entries, user_id)
             
             if send_message(user_id, digest, html=True):
+                # Mark articles as seen
+                article_urls = [e.get("link") for e in new_entries if e.get("link")]
+                if article_urls:
+                    mark_articles_seen(user_id, article_urls)
+                
                 set_last_sent_date(user_id, today)
                 sent_count += 1
-                print(f"[Scheduler] ✅ Sent to {user_id}")
+                print(f"[Scheduler] ✅ Sent {len(new_entries)} articles to {user_id}")
             else:
                 print(f"[Scheduler] ❌ Failed to send to {user_id}")
                 
