@@ -602,6 +602,13 @@ def handle_removefeed(chat_id: str, user_id: str, args: str) -> None:
 
 
 def handle_digest(chat_id: str, user_id: str) -> None:
+    global users_processing_digest
+    
+    # Prevent duplicate digest requests
+    if user_id in users_processing_digest:
+        send_message(chat_id, "⏳ Already fetching your digest, please wait...")
+        return
+    
     allowed, error = check_rate_limit(user_id, "digest_request")
     if not allowed:
         send_message(chat_id, f"⚠️ {error}")
@@ -618,13 +625,20 @@ def handle_digest(chat_id: str, user_id: str) -> None:
         )
         return
     
-    send_message(chat_id, "⏳ Fetching your feeds...")
+    # Mark as processing
+    users_processing_digest.add(user_id)
     
-    since = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
-    entries = fetch_entries_for_user(user_id, since)
-    digest = build_digest(entries, user_id)
-    
-    send_message(chat_id, digest, html=True)
+    try:
+        send_message(chat_id, "⏳ Fetching your feeds...")
+        
+        since = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
+        entries = fetch_entries_for_user(user_id, since)
+        digest = build_digest(entries, user_id)
+        
+        send_message(chat_id, digest, html=True)
+    finally:
+        # Always remove from processing set
+        users_processing_digest.discard(user_id)
 
 
 def handle_status(chat_id: str, user_id: str) -> None:
@@ -1344,20 +1358,25 @@ def send_scheduled_digests():
     current_hour = now.hour
     current_minute = now.minute
     
-    print(f"[{now}] Checking scheduled digests (UTC {current_hour:02d}:{current_minute:02d})...")
+    print(f"[Scheduler] {now.strftime('%Y-%m-%d %H:%M')} UTC - Checking digests...")
     
     users = get_all_users()
-    if not users and TELEGRAM_CHAT_ID:
-        users = [TELEGRAM_CHAT_ID]
+    if not users:
+        print("[Scheduler] No users found")
+        return
     
     today = now.strftime("%Y-%m-%d")
     since = now - timedelta(hours=LOOKBACK_HOURS)
     
+    sent_count = 0
+    skipped_count = 0
+    
     for user_id in users:
         try:
-            # Check if already sent today
+            # Check if already sent today - MOST IMPORTANT CHECK
             last_sent = get_last_sent_date(user_id)
             if last_sent == today:
+                skipped_count += 1
                 continue
             
             # Get user's preferred time
@@ -1369,36 +1388,47 @@ def send_scheduled_digests():
             except:
                 user_hour, user_minute = 8, 0  # Default to 08:00
             
-            # Check if it's time to send (within 30-minute window)
-            # Convert user's local time preference to a check window
+            # Check if it's time to send (must match the hour)
             if current_hour != user_hour:
                 continue
-            if abs(current_minute - user_minute) > 30:
+            
+            # Only send within first 15 minutes of the hour to avoid duplicates
+            if current_minute > 15:
                 continue
             
             feeds = list_feeds(user_id)
             if not feeds:
                 continue
             
+            print(f"[Scheduler] Sending digest to {user_id}...")
+            
             entries = fetch_entries_for_user(user_id, since)
             digest = build_digest(entries, user_id)
             
             if send_message(user_id, digest, html=True):
                 set_last_sent_date(user_id, today)
-                print(f"Digest sent to {user_id} at their scheduled time {user_time}")
+                sent_count += 1
+                print(f"[Scheduler] ✅ Sent to {user_id}")
+            else:
+                print(f"[Scheduler] ❌ Failed to send to {user_id}")
+                
         except Exception as e:
-            print(f"Error sending digest to {user_id}: {e}")
+            print(f"[Scheduler] Error for {user_id}: {e}")
+    
+    if sent_count > 0 or skipped_count > 0:
+        print(f"[Scheduler] Done. Sent: {sent_count}, Skipped (already sent today): {skipped_count}")
 
 
 def run_scheduler():
     """Run the scheduler in a background thread."""
-    # Check every 15 minutes instead of once daily
-    schedule.every(15).minutes.do(send_scheduled_digests)
-    print(f"Scheduler started. Checking for digest delivery every 15 minutes.")
+    # Run at the start of each hour
+    schedule.every().hour.at(":00").do(send_scheduled_digests)
+    schedule.every().hour.at(":15").do(send_scheduled_digests)  # Backup check
+    print(f"[Scheduler] Started. Will check at :00 and :15 of each hour.")
     
     while True:
         schedule.run_pending()
-        time.sleep(60)
+        time.sleep(30)
 
 
 # ---------------- FLASK ROUTES ----------------
@@ -1412,11 +1442,31 @@ def health():
     })
 
 
+# Track processed updates to prevent duplicates
+processed_updates = set()
+MAX_PROCESSED_UPDATES = 1000
+
+# Track users currently getting digests to prevent duplicate requests
+users_processing_digest = set()
+
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
+    global processed_updates
+    
     try:
         update = request.get_json()
-        print(f"Received update: {update.get('update_id', 'N/A')}")
+        update_id = update.get('update_id')
+        
+        # Deduplicate - skip if already processed
+        if update_id in processed_updates:
+            return jsonify({"ok": True})
+        
+        # Track this update IMMEDIATELY
+        processed_updates.add(update_id)
+        
+        # Limit memory usage
+        if len(processed_updates) > MAX_PROCESSED_UPDATES:
+            processed_updates = set(list(processed_updates)[MAX_PROCESSED_UPDATES//2:])
         
         if "pre_checkout_query" in update:
             handle_pre_checkout(update["pre_checkout_query"])
@@ -1427,7 +1477,8 @@ def telegram_webhook():
         return jsonify({"ok": True})
     except Exception as e:
         print(f"Webhook error: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
+        # Still return OK to prevent Telegram retries
+        return jsonify({"ok": True})
 
 
 @app.route("/trigger-digest", methods=["POST"])
