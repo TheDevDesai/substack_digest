@@ -261,4 +261,3 @@ Pull requests welcome! Please:
 ---
 
 Made with ❤️ for newsletter enthusiasts
-# 2 day lookback, no duplicates

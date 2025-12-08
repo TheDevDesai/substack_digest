@@ -492,6 +492,7 @@ def handle_help(chat_id: str, user_id: str) -> None:
     text += "<b>📰 Feed Management:</b>\n"
     text += "/feedlist — Show your subscribed feeds\n"
     text += "/addfeed &lt;url&gt; — Add a new feed\n"
+    text += "/bulkadd — Add multiple feeds at once\n"
     text += "/removefeed &lt;#&gt; — Remove a feed by number\n"
     text += "/testfeed — Check all feeds are working\n"
     text += "/testfeed &lt;url&gt; — Test a specific feed\n\n"
@@ -599,6 +600,111 @@ def handle_removefeed(chat_id: str, user_id: str, args: str) -> None:
         send_message(chat_id, f"❌ Removed:\n{msg}")
     else:
         send_message(chat_id, f"⚠️ {msg}")
+
+
+def handle_bulkadd(chat_id: str, user_id: str, full_text: str) -> None:
+    """Handle bulk adding feeds - works for all users."""
+    import re
+    
+    # Extract everything after /bulkadd
+    match = re.match(r'^/bulkadd\s*(.*)', full_text, re.DOTALL | re.IGNORECASE)
+    if not match or not match.group(1).strip():
+        send_message(
+            chat_id,
+            "<b>📰 Bulk Add Feeds</b>\n\n"
+            "Add multiple feeds at once. Send:\n\n"
+            "<code>/bulkadd\n"
+            "https://example1.substack.com/feed\n"
+            "https://example2.substack.com/feed\n"
+            "https://newsletter.com/feed</code>\n\n"
+            "<i>Each URL on a new line</i>",
+            html=True
+        )
+        return
+    
+    feed_input = match.group(1).strip()
+    
+    # Extract all URLs from the input using regex
+    url_pattern = r'https?://[^\s<>"\',]+'
+    feed_urls = re.findall(url_pattern, feed_input)
+    
+    # Clean up URLs (remove trailing punctuation)
+    cleaned_urls = []
+    for url in feed_urls:
+        # Remove trailing punctuation that might have been captured
+        url = url.rstrip('.,;:!?)>')
+        cleaned_urls.append(url)
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_urls = []
+    for url in cleaned_urls:
+        if url.lower() not in seen:
+            seen.add(url.lower())
+            unique_urls.append(url)
+    feed_urls = unique_urls
+    
+    if not feed_urls:
+        send_message(chat_id, "⚠️ No valid URLs found. URLs must start with http:// or https://")
+        return
+    
+    # Check user's feed limit
+    tier_limits = get_tier_limits(user_id)
+    current_feeds = list_feeds(user_id)
+    max_feeds = tier_limits.get("max_feeds", 3)
+    available_slots = max_feeds - len(current_feeds)
+    
+    if available_slots <= 0:
+        send_message(
+            chat_id,
+            f"⚠️ You've reached your limit of {max_feeds} feeds.\n\n"
+            f"Use /removefeed to remove some, or /upgrade for more!",
+            html=True
+        )
+        return
+    
+    # Limit to available slots
+    if len(feed_urls) > available_slots:
+        feed_urls = feed_urls[:available_slots]
+        send_message(
+            chat_id,
+            f"⚠️ You can only add {available_slots} more feed(s). Processing first {available_slots}...",
+        )
+    else:
+        send_message(chat_id, f"⏳ Adding {len(feed_urls)} feeds...")
+    
+    added = []
+    failed = []
+    
+    for url in feed_urls:
+        success, msg = add_feed(user_id, url)
+        if success:
+            added.append(msg)
+        else:
+            failed.append(f"{url}: {msg}")
+    
+    text = f"<b>📰 Bulk Add Results</b>\n\n"
+    text += f"✅ Added: {len(added)}\n"
+    text += f"❌ Failed: {len(failed)}\n"
+    
+    if added and len(added) <= 15:
+        text += f"\n<b>Added:</b>\n"
+        for a in added:
+            text += f"• {escape_html(a)}\n"
+    elif added:
+        text += f"\n<b>Added:</b>\n"
+        for a in added[:10]:
+            text += f"• {escape_html(a)}\n"
+        text += f"<i>...and {len(added) - 10} more</i>\n"
+    
+    if failed and len(failed) <= 5:
+        text += f"\n<b>Failed:</b>\n"
+        for f in failed[:5]:
+            text += f"• {escape_html(f)}\n"
+    elif failed:
+        text += f"\n<b>Failed:</b> {len(failed)} feeds (check URLs)\n"
+    
+    send_message(chat_id, text, html=True)
 
 
 def handle_digest(chat_id: str, user_id: str) -> None:
@@ -1365,6 +1471,7 @@ def handle_message(message: dict) -> None:
         "/feedlist": lambda: handle_feedlist(chat_id, user_id),
         "/addfeed": lambda: handle_addfeed(chat_id, user_id, args),
         "/removefeed": lambda: handle_removefeed(chat_id, user_id, args),
+        "/bulkadd": lambda: handle_bulkadd(chat_id, user_id, text),  # Pass full text for URL parsing
         "/testfeed": lambda: handle_testfeed(chat_id, user_id, args),
         "/digest": lambda: handle_digest(chat_id, user_id),
         "/dailydigest": lambda: handle_digest(chat_id, user_id),
