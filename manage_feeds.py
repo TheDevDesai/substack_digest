@@ -5,6 +5,8 @@ Handles per-user feed subscriptions with three-tier hierarchy:
 - Owner: Full control (add/remove admins, block users, broadcast, etc.)
 - Admin: Free Pro access only (no admin commands)
 - User: Regular free/paid users
+
+Uses PostgreSQL when DATABASE_URL is set, falls back to JSON files.
 """
 
 import json
@@ -13,6 +15,22 @@ import re
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+
+# Import database module for PostgreSQL support
+try:
+    from database import (
+        USE_POSTGRES, db_ensure_user, db_get_user, db_update_user,
+        db_get_all_users, db_add_feed, db_remove_feed, db_list_feeds,
+        db_count_feeds, db_get_seen_articles, db_mark_articles_seen,
+        db_clear_seen_articles, db_get_owner_id, db_set_owner_id,
+        db_get_admins, db_add_admin, db_remove_admin, db_get_config,
+        db_set_config, db_record_payment, db_get_recent_payments,
+        db_get_payment_stats, db_check_rate_limit
+    )
+    print("[manage_feeds] Database module loaded")
+except ImportError:
+    USE_POSTGRES = False
+    print("[manage_feeds] Database module not available, using JSON files")
 
 STATE_FILE = "user_state.json"
 CONFIG_FILE = "bot_config.json"
@@ -49,6 +67,13 @@ RATE_LIMITS = {
 
 def load_config() -> dict:
     """Load bot configuration (owner and admins)."""
+    # Try database first
+    if USE_POSTGRES:
+        owner = db_get_owner_id()
+        admins = db_get_admins()
+        return {"owner_id": owner, "admins": admins}
+    
+    # Fall back to JSON
     if not os.path.exists(CONFIG_FILE):
         return {"owner_id": None, "admins": []}
     try:
@@ -60,20 +85,35 @@ def load_config() -> dict:
 
 def save_config(config: dict) -> None:
     """Save bot configuration."""
+    # Save to database if available
+    if USE_POSTGRES:
+        if config.get("owner_id"):
+            db_set_owner_id(config["owner_id"])
+        if "admins" in config:
+            db_set_config("admins", config["admins"])
+    
+    # Always save to JSON as backup
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2)
 
 
 def get_owner_id() -> Optional[str]:
     """Get the owner's user ID."""
+    if USE_POSTGRES:
+        owner = db_get_owner_id()
+        if owner:
+            return owner
     config = load_config()
     return config.get("owner_id")
 
 
 def set_owner_id(user_id: str) -> None:
     """Set the owner's user ID (only if not already set)."""
-    config = load_config()
-    if not config.get("owner_id"):
+    current_owner = get_owner_id()
+    if not current_owner:
+        if USE_POSTGRES:
+            db_set_owner_id(str(user_id))
+        config = load_config()
         config["owner_id"] = str(user_id)
         save_config(config)
 
@@ -381,6 +421,13 @@ def unblock_user(user_id: str) -> None:
 
 def get_seen_articles(user_id: str) -> set:
     """Get set of article URLs user has already seen."""
+    # Try database first
+    if USE_POSTGRES:
+        seen = db_get_seen_articles(user_id)
+        if seen is not None:
+            return seen
+    
+    # Fall back to JSON
     state = ensure_user(user_id)
     user_id = str(user_id)
     seen = state[user_id].get("seen_articles", [])
@@ -389,6 +436,16 @@ def get_seen_articles(user_id: str) -> set:
 
 def mark_articles_seen(user_id: str, article_urls: list) -> None:
     """Mark articles as seen by user. Keeps last 500 to limit storage."""
+    if not article_urls:
+        return
+    
+    # Try database first
+    if USE_POSTGRES:
+        db_ensure_user(user_id)
+        if db_mark_articles_seen(user_id, article_urls):
+            return
+    
+    # Fall back to JSON
     state = load_state()
     user_id = str(user_id)
     
@@ -412,6 +469,12 @@ def mark_articles_seen(user_id: str, article_urls: list) -> None:
 
 def clear_seen_articles(user_id: str) -> None:
     """Clear user's seen articles history."""
+    # Try database first
+    if USE_POSTGRES:
+        if db_clear_seen_articles(user_id):
+            return
+    
+    # Fall back to JSON
     state = load_state()
     user_id = str(user_id)
     
@@ -581,6 +644,13 @@ def set_stripe_customer_id(user_id: str, customer_id: str) -> None:
 
 def list_feeds(user_id: str) -> list:
     """Get list of feeds for a user."""
+    # Try database first
+    if USE_POSTGRES:
+        feeds = db_list_feeds(user_id)
+        if feeds is not None:
+            return feeds
+    
+    # Fall back to JSON
     state = ensure_user(user_id)
     return state[str(user_id)]["feeds"]
 
@@ -599,13 +669,13 @@ def add_feed(user_id: str, url: str) -> tuple[bool, str]:
     
     url = result
     
-    state = ensure_user(user_id)
-    user_id = str(user_id)
-    
+    # Check feed limit
     tier_limits = get_tier_limits(user_id)
     max_feeds = tier_limits["max_feeds"]
     
-    if len(state[user_id]["feeds"]) >= max_feeds:
+    current_feeds = list_feeds(user_id)
+    
+    if len(current_feeds) >= max_feeds:
         sub = get_subscription(user_id)
         tier = sub.get("tier", "free")
         if tier == "free" and not is_privileged(user_id):
@@ -613,9 +683,18 @@ def add_feed(user_id: str, url: str) -> tuple[bool, str]:
         else:
             return False, f"Feed limit reached ({max_feeds})."
     
-    if url in state[user_id]["feeds"]:
+    if url in current_feeds:
         return False, "Feed already added."
     
+    # Add to database if available
+    if USE_POSTGRES:
+        db_ensure_user(user_id)
+        if db_add_feed(user_id, url):
+            return True, url
+    
+    # Fall back to JSON
+    state = ensure_user(user_id)
+    user_id = str(user_id)
     state[user_id]["feeds"].append(url)
     save_state(state)
     return True, url
@@ -623,20 +702,35 @@ def add_feed(user_id: str, url: str) -> tuple[bool, str]:
 
 def remove_feed(user_id: str, url_or_index: str) -> tuple[bool, str]:
     """Remove a feed by URL or 1-based index."""
-    state = ensure_user(user_id)
-    user_id = str(user_id)
-    feeds = state[user_id]["feeds"]
+    feeds = list_feeds(user_id)
     
     if url_or_index.isdigit():
         idx = int(url_or_index) - 1
         if 0 <= idx < len(feeds):
-            removed = feeds.pop(idx)
+            removed = feeds[idx]
+            
+            # Remove from database if available
+            if USE_POSTGRES:
+                if db_remove_feed(user_id, removed):
+                    return True, removed
+            
+            # Fall back to JSON
+            state = ensure_user(user_id)
+            user_id_str = str(user_id)
+            state[user_id_str]["feeds"].pop(idx)
             save_state(state)
             return True, removed
         return False, "Invalid index."
     
     if url_or_index in feeds:
-        feeds.remove(url_or_index)
+        # Remove from database if available
+        if USE_POSTGRES:
+            if db_remove_feed(user_id, url_or_index):
+                return True, url_or_index
+        
+        # Fall back to JSON
+        state = ensure_user(user_id)
+        state[str(user_id)]["feeds"].remove(url_or_index)
         save_state(state)
         return True, url_or_index
     
@@ -666,6 +760,13 @@ def get_digest_time(user_id: str) -> str:
 
 def get_summary_format(user_id: str) -> tuple[str, Optional[str]]:
     """Get user's preferred summary format and custom prompt if any."""
+    # Try database first
+    if USE_POSTGRES:
+        user = db_get_user(user_id)
+        if user:
+            return user.get("summary_format") or "scqr", user.get("custom_prompt")
+    
+    # Fall back to JSON
     state = ensure_user(user_id)
     user = state[str(user_id)]
     return user.get("summary_format", "scqr"), user.get("custom_prompt")
@@ -677,6 +778,13 @@ def set_summary_format(user_id: str, format_type: str) -> bool:
     if format_type not in valid_formats:
         return False
     
+    # Try database first
+    if USE_POSTGRES:
+        db_ensure_user(user_id)
+        if db_update_user(user_id, summary_format=format_type):
+            return True
+    
+    # Fall back to JSON
     state = ensure_user(user_id)
     state[str(user_id)]["summary_format"] = format_type
     save_state(state)
@@ -685,6 +793,13 @@ def set_summary_format(user_id: str, format_type: str) -> bool:
 
 def set_custom_prompt(user_id: str, prompt: str) -> bool:
     """Set user's custom summary prompt."""
+    # Try database first
+    if USE_POSTGRES:
+        db_ensure_user(user_id)
+        if db_update_user(user_id, custom_prompt=prompt, summary_format="custom"):
+            return True
+    
+    # Fall back to JSON
     state = ensure_user(user_id)
     state[str(user_id)]["custom_prompt"] = prompt
     state[str(user_id)]["summary_format"] = "custom"
@@ -694,6 +809,11 @@ def set_custom_prompt(user_id: str, prompt: str) -> bool:
 
 def clear_custom_prompt(user_id: str) -> None:
     """Clear user's custom prompt and reset to default format."""
+    # Try database first
+    if USE_POSTGRES:
+        db_update_user(user_id, custom_prompt=None, summary_format="scqr")
+    
+    # Also update JSON
     state = ensure_user(user_id)
     state[str(user_id)]["custom_prompt"] = None
     state[str(user_id)]["summary_format"] = "scqr"
@@ -713,12 +833,15 @@ def set_last_sent_date(user_id: str, date_str: str) -> None:
     save_state(state)
 
 
-# -----------------------------
-#  Utility Functions
-# -----------------------------
-
 def get_all_users() -> list:
     """Get list of all user IDs in the system."""
+    # Try database first
+    if USE_POSTGRES:
+        users = db_get_all_users()
+        if users:
+            return users
+    
+    # Fall back to JSON
     state = load_state()
     return list(state.keys())
 

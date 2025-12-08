@@ -733,6 +733,7 @@ def handle_digest(chat_id: str, user_id: str) -> None:
     
     # Mark as processing
     users_processing_digest.add(user_id)
+    start_time = time.time()
     
     try:
         send_message(chat_id, "⏳ Fetching your feeds...")
@@ -741,7 +742,7 @@ def handle_digest(chat_id: str, user_id: str) -> None:
         entries = fetch_entries_for_user(user_id, since)
         
         # Filter out articles user has already seen
-        from manage_feeds import get_seen_articles, mark_articles_seen
+        from manage_feeds import get_seen_articles, mark_articles_seen, get_summary_format
         seen_articles = get_seen_articles(user_id)
         new_entries = [e for e in entries if e.get("link") not in seen_articles]
         
@@ -762,6 +763,42 @@ def handle_digest(chat_id: str, user_id: str) -> None:
             mark_articles_seen(user_id, article_urls)
         
         send_message(chat_id, digest, html=True)
+        
+        # Track analytics
+        try:
+            from database import USE_POSTGRES, db_log_digest, db_log_article_delivery, db_track_activity
+            if USE_POSTGRES:
+                processing_time = int((time.time() - start_time) * 1000)
+                format_used, _ = get_summary_format(user_id)
+                
+                # Log digest delivery
+                db_log_digest(
+                    user_id=user_id,
+                    articles_count=len(new_entries),
+                    feeds_count=len(feeds),
+                    format_used=format_used,
+                    delivery_type="manual",
+                    processing_time_ms=processing_time
+                )
+                
+                # Log each article delivered
+                for entry in new_entries:
+                    db_log_article_delivery(
+                        user_id=user_id,
+                        article_url=entry.get("link", ""),
+                        article_title=entry.get("title", ""),
+                        feed_url=entry.get("feed_url", ""),
+                        published_at=entry.get("published").isoformat() if entry.get("published") else None
+                    )
+                
+                # Track user activity
+                db_track_activity(user_id, "digest_requested", {
+                    "articles": len(new_entries),
+                    "feeds": len(feeds)
+                })
+        except Exception as e:
+            print(f"[Analytics] Error tracking: {e}")
+            
     finally:
         # Always remove from processing set
         users_processing_digest.discard(user_id)
@@ -1023,7 +1060,7 @@ def handle_format(chat_id: str, user_id: str, args: str) -> None:
         text = "<b>📝 Summary Format Settings</b>\n\n"
         text += f"<b>Current format:</b> {current_format.upper()}\n\n"
         text += "<b>Available formats:</b>\n"
-        text += "• <code>scqr</code> — Situation, Complication, Question, Resolution\n"
+        text += "• <code>scqr</code> — SCQRT Minto Pyramid + Timeline\n"
         text += "• <code>tldr</code> — Brief 2-3 sentence summary\n"
         text += "• <code>bullets</code> — Key takeaways as bullet points\n"
         text += "• <code>eli5</code> — Simple explanation anyone can understand\n"
@@ -1031,10 +1068,12 @@ def handle_format(chat_id: str, user_id: str, args: str) -> None:
         text += "<b>Commands:</b>\n"
         text += "/format &lt;name&gt; — Set format (e.g., /format tldr)\n"
         text += "/format custom &lt;prompt&gt; — Set custom format\n"
-        text += "/format reset — Reset to default (SCQR)\n"
+        text += "/format templates — See custom prompt templates\n"
+        text += "/format reset — Reset to default (SCQRT)\n"
         
         if custom_prompt:
-            text += f"\n\n<b>Your custom prompt:</b>\n<i>{escape_html(custom_prompt[:100])}...</i>"
+            preview = custom_prompt[:150] + "..." if len(custom_prompt) > 150 else custom_prompt
+            text += f"\n\n<b>Your custom prompt:</b>\n<i>{escape_html(preview)}</i>"
         
         send_message(chat_id, text, html=True)
         return
@@ -1044,24 +1083,48 @@ def handle_format(chat_id: str, user_id: str, args: str) -> None:
     
     if subcommand == "reset":
         clear_custom_prompt(user_id)
-        send_message(chat_id, "✅ Reset to default SCQR format.")
+        send_message(chat_id, "✅ Reset to default SCQRT format.")
+        return
+    
+    if subcommand == "templates":
+        text = (
+            "<b>📋 Custom Prompt Templates</b>\n\n"
+            "Copy and modify these:\n\n"
+            
+            "<b>1. CEO Brief:</b>\n"
+            "<code>/format custom Analyze for a CEO: What's the key insight? Why does it matter strategically? What's the market/competitive implication? Respond in JSON: {\"insight\": \"\", \"strategic_impact\": \"\", \"implication\": \"\"}</code>\n\n"
+            
+            "<b>2. Investment Lens:</b>\n"
+            "<code>/format custom Analyze from an investor perspective: What's the thesis? What are the risks? What signals to watch? Include any numbers mentioned. JSON: {\"thesis\": \"\", \"risks\": [], \"signals\": [], \"key_numbers\": []}</code>\n\n"
+            
+            "<b>3. Tech Deep Dive:</b>\n"
+            "<code>/format custom Technical analysis: What's the innovation? How does it work? What are limitations? What's the competitive landscape? JSON: {\"innovation\": \"\", \"how_it_works\": \"\", \"limitations\": [], \"competitors\": []}</code>\n\n"
+            
+            "<b>4. Contrarian View:</b>\n"
+            "<code>/format custom Play devil's advocate: What's the main argument? What's the counter-argument? What's the author missing? JSON: {\"main_argument\": \"\", \"counter_argument\": \"\", \"blind_spots\": []}</code>\n\n"
+            
+            "<b>5. Learning Extract:</b>\n"
+            "<code>/format custom Extract learnings: What's the core concept? What examples support it? How can I apply this? JSON: {\"concept\": \"\", \"examples\": [], \"applications\": []}</code>\n\n"
+            
+            "<i>Tip: Always request JSON output with specific keys for best results.</i>"
+        )
+        send_message(chat_id, text, html=True)
         return
     
     if subcommand == "custom":
         if len(parts) < 2:
             text = (
                 "<b>📝 Custom Format</b>\n\n"
-                "Create your own summary format!\n\n"
+                "Create your own AI summary format!\n\n"
                 "<b>Usage:</b>\n"
-                "<code>/format custom Your prompt here...</code>\n\n"
-                "<b>Example:</b>\n"
-                "<code>/format custom Summarize this article as if you're explaining it to a busy CEO. "
-                "Focus on: 1) The main point 2) Why it matters 3) What to do about it. "
-                "Respond in JSON with keys: main_point, why_it_matters, action</code>\n\n"
+                "<code>/format custom [your prompt]</code>\n\n"
+                "<b>Quick Example:</b>\n"
+                "<code>/format custom Summarize for a busy executive: 1) Main point 2) Why it matters 3) Action to take. Respond in JSON: {\"main_point\": \"\", \"importance\": \"\", \"action\": \"\"}</code>\n\n"
                 "<b>Tips:</b>\n"
-                "• Ask for JSON output with specific keys\n"
-                "• Use {title}, {content}, {feed_name} placeholders\n"
-                "• Be specific about what you want"
+                "• Request JSON output with specific keys\n"
+                "• Be specific about your perspective (CEO, investor, etc.)\n"
+                "• Ask for specific things (numbers, risks, actions)\n\n"
+                "📋 <b>See more templates:</b> /format templates"
             )
             send_message(chat_id, text, html=True)
             return
@@ -1076,9 +1139,9 @@ def handle_format(chat_id: str, user_id: str, args: str) -> None:
         set_custom_prompt(user_id, result)
         send_message(
             chat_id,
-            "✅ Custom format saved!\n\n"
-            "Your next digest will use this format.\n"
-            "Use /digest to test it now.",
+            "✅ <b>Custom format saved!</b>\n\n"
+            "Your next /digest will use this format.\n"
+            "Use /format reset to go back to default.",
             html=True
         )
         return
@@ -1134,7 +1197,8 @@ def handle_owner(chat_id: str, user_id: str, args: str) -> None:
             "/owner clearhistory — Reset seen articles (show all again)\n\n"
             
             "<b>📊 Analytics:</b>\n"
-            "/owner stats — Full analytics dashboard\n"
+            "/owner stats — Overview dashboard\n"
+            "/owner analytics — Detailed analytics\n"
             "/owner payments — Recent payments\n\n"
             
             "<b>🛠 Tools:</b>\n"
@@ -1172,7 +1236,130 @@ def handle_owner(chat_id: str, user_id: str, args: str) -> None:
             
             f"<i>~${payment_stats['all_time']['revenue'] * 0.02:.2f} USD total (before Telegram fees)</i>"
         )
+        
+        # Add database analytics if available
+        try:
+            from database import USE_POSTGRES, db_get_user_engagement_stats
+            if USE_POSTGRES:
+                db_stats = db_get_user_engagement_stats()
+                if db_stats:
+                    text += "\n\n<b>📈 Engagement:</b>\n"
+                    text += f"• Active (7d): {db_stats.get('active_users_7d', 0)}\n"
+                    text += f"• Digests today: {db_stats.get('digests_today', 0)}\n"
+                    text += f"• Total digests: {db_stats.get('total_digests_sent', 0)}\n"
+                    text += f"• Articles delivered: {db_stats.get('total_articles_delivered', 0)}\n"
+                    text += f"• Avg feeds/user: {db_stats.get('avg_feeds_per_user', 0)}"
+        except Exception as e:
+            print(f"[Stats] Error fetching db stats: {e}")
+        
         send_message(chat_id, text, html=True)
+    
+    elif subcommand == "analytics":
+        # Detailed analytics from database
+        try:
+            from database import (USE_POSTGRES, db_get_user_engagement_stats, 
+                                 db_get_popular_feeds, db_get_format_usage, db_get_retention_stats)
+            if not USE_POSTGRES:
+                send_message(chat_id, "⚠️ Database not configured. Add PostgreSQL for full analytics.")
+                return
+            
+            engagement = db_get_user_engagement_stats()
+            popular_feeds = db_get_popular_feeds(5)
+            format_usage = db_get_format_usage()
+            retention = db_get_retention_stats()
+            
+            # Get payment stats for revenue
+            payment_stats = get_payment_stats()
+            
+            text = "<b>📊 Detailed Analytics</b>\n\n"
+            
+            # === COSTS & BREAKEVEN ===
+            # Railway: ~$5/month (Hobby plan)
+            # OpenAI: ~$0.002 per digest (gpt-4o-mini)
+            # Assuming ~30 digests/user/month
+            
+            railway_cost = 5.00  # USD/month
+            openai_per_digest = 0.002  # USD per digest
+            digests_per_user_month = 30
+            openai_cost_per_user = openai_per_digest * digests_per_user_month  # ~$0.06/user/month
+            
+            total_users = engagement.get('total_users', 0)
+            pro_users = engagement.get('pro_users', 0)
+            
+            # Revenue: 50 Stars = $1, Telegram takes ~30%, you get ~$0.70
+            # Monthly revenue = pro_users * $0.70
+            revenue_per_pro = 0.70  # USD after Telegram fees
+            monthly_revenue = pro_users * revenue_per_pro
+            
+            # Costs
+            estimated_openai_cost = total_users * openai_cost_per_user
+            total_monthly_cost = railway_cost + estimated_openai_cost
+            
+            # Breakeven calculation
+            # Need: total_cost = pro_users * revenue_per_pro
+            # pro_users_needed = total_cost / revenue_per_pro
+            breakeven_pro_users = total_monthly_cost / revenue_per_pro if revenue_per_pro > 0 else 0
+            
+            # Profit/Loss
+            profit_loss = monthly_revenue - total_monthly_cost
+            
+            text += "<b>💰 Costs & Revenue:</b>\n"
+            text += f"• Railway: ${railway_cost:.2f}/mo\n"
+            text += f"• OpenAI (est): ${estimated_openai_cost:.2f}/mo\n"
+            text += f"• <b>Total cost: ${total_monthly_cost:.2f}/mo</b>\n\n"
+            
+            text += f"• Revenue: ${monthly_revenue:.2f}/mo ({pro_users} Pro)\n"
+            if profit_loss >= 0:
+                text += f"• ✅ Profit: <b>${profit_loss:.2f}/mo</b>\n\n"
+            else:
+                text += f"• ❌ Loss: <b>${abs(profit_loss):.2f}/mo</b>\n\n"
+            
+            text += "<b>🎯 Breakeven:</b>\n"
+            text += f"• Need: <b>{int(breakeven_pro_users) + 1} Pro users</b>\n"
+            text += f"• Have: {pro_users} Pro users\n"
+            if pro_users >= breakeven_pro_users:
+                text += f"• ✅ You're profitable!\n\n"
+            else:
+                needed = int(breakeven_pro_users) + 1 - pro_users
+                text += f"• ⏳ Need {needed} more Pro users\n\n"
+            
+            # === ENGAGEMENT ===
+            text += "<b>👥 User Engagement:</b>\n"
+            text += f"• Total users: {total_users}\n"
+            text += f"• Active (7d): {engagement.get('active_users_7d', 0)}\n"
+            text += f"• Pro users: {pro_users}\n"
+            conversion = (pro_users / total_users * 100) if total_users > 0 else 0
+            text += f"• Conversion: {conversion:.1f}%\n"
+            text += f"• Avg feeds/user: {engagement.get('avg_feeds_per_user', 0)}\n\n"
+            
+            text += "<b>📬 Digest Stats:</b>\n"
+            text += f"• Total sent: {engagement.get('total_digests_sent', 0)}\n"
+            text += f"• Today: {engagement.get('digests_today', 0)}\n"
+            text += f"• Articles delivered: {engagement.get('total_articles_delivered', 0)}\n\n"
+            
+            if popular_feeds:
+                text += "<b>🔥 Popular Feeds:</b>\n"
+                for i, feed in enumerate(popular_feeds[:5], 1):
+                    url = feed['feed_url']
+                    # Extract domain for display
+                    domain = url.split('/')[2] if '/' in url else url
+                    text += f"{i}. {domain} ({feed['subscriber_count']} subs)\n"
+                text += "\n"
+            
+            if format_usage:
+                text += "<b>📝 Format Usage:</b>\n"
+                for fmt in format_usage:
+                    text += f"• {fmt['summary_format']}: {fmt['user_count']} users\n"
+                text += "\n"
+            
+            if retention:
+                text += "<b>📈 Retention:</b>\n"
+                text += f"• Users received digest: {retention.get('users_received_digest', 0)}\n"
+                text += f"• 7-day retention: {retention.get('retention_rate', 0)}%\n"
+            
+            send_message(chat_id, text, html=True)
+        except Exception as e:
+            send_message(chat_id, f"⚠️ Error fetching analytics: {e}")
     
     elif subcommand == "testpayment":
         send_message(chat_id, "🧪 Sending test payment invoice...")
