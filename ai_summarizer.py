@@ -265,10 +265,12 @@ def generate_summary(
             },
             json={
                 "model": DEFAULT_MODEL,
-                "system": system_msg,        # top-level field, not a message role
+                "system": system_msg,
                 "messages": [
                     {"role": "user", "content": prompt},
                 ],
+                "max_tokens": MAX_TOKENS,
+                "temperature": TEMPERATURE,
             },
             timeout=30,
         )
