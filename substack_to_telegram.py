@@ -372,7 +372,11 @@ def build_digest(entries: list, user_id: str) -> str:
             
             # If Pro user but no summary, note the issue
             if use_ai_summaries:
-                text += f"<i>(Summary unavailable)</i>\n"
+                raw_summary = entry.get("summary", "")
+                if not clean_html(raw_summary).strip():
+                    text += f"<i>(Full article not available in RSS feed — <a href=\"{entry.get('link', '')}\">read here</a>)</i>\n"
+                else:
+                    text += f"<i>(Summary unavailable)</i>\n"
         
         text += "\n━━━━━━━━━━━━━━━━━━━━\n\n"
     
