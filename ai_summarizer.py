@@ -397,7 +397,7 @@ Summary:"""
 
 def clean_html(text: str) -> str:
     """Remove HTML tags and clean up text."""
-    clean = re.sub(r'<[^>]+>', '', text)
+    clean = re.sub(r'<[^>]*>?', '', text)
     clean = ' '.join(clean.split())
     clean = clean.replace('&amp;', '&')
     clean = clean.replace('&lt;', '<')
