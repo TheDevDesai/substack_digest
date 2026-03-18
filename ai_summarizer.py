@@ -369,7 +369,8 @@ Summary:"""
         response = requests.post(
             OPENAI_API_URL,
             headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "x-api-key": OPENAI_API_KEY,
+                "anthropic-version": "2023-06-01",
                 "Content-Type": "application/json",
             },
             json={
@@ -377,17 +378,15 @@ Summary:"""
                 "messages": [
                     {"role": "user", "content": prompt},
                 ],
-                "max_tokens": 150,
+                "max_tokens": 200,
                 "temperature": 0.3,
             },
             timeout=20,
         )
-        
+
         if response.status_code == 200:
             data = response.json()
-            return data["choices"][0]["message"]["content"].strip()
-        
-        return None
+            return data["content"][0]["text"].strip()  # fix response parsing too
         
     except (requests.RequestException, KeyError) as e:
         print(f"Error generating quick summary: {e}")
