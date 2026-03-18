@@ -364,18 +364,21 @@ def build_digest(entries: list, user_id: str) -> str:
                     text += " | ".join(term_strs) + "\n"
         else:
             # No AI summary - show preview (for free users or if AI failed)
-            summary = clean_html(entry.get("summary", ""))
+            raw_summary = entry.get("summary", "")
+            summary = clean_html(raw_summary)
             if summary:
                 if len(summary) > 300:
                     summary = summary[:297] + "..."
                 text += f"<i>{escape_html(summary)}</i>\n"
-            
-            # If Pro user but no summary, note the issue
+
+            # If Pro user but no summary, explain why
             if use_ai_summaries:
-                raw_summary = entry.get("summary", "")
-                if not clean_html(raw_summary).strip():
-                    text += f"<i>(Full article not available in RSS feed — <a href=\"{entry.get('link', '')}\">read here</a>)</i>\n"
+                if len(clean_html(raw_summary)) < 50:
+                    # Feed provided no usable content
+                    link = entry.get("link", "")
+                    text += f"<i>(Full article not in RSS feed — <a href=\"{link}\">read here</a>)</i>\n"
                 else:
+                    # Had content but API call failed
                     text += f"<i>(Summary unavailable)</i>\n"
         
         text += "\n━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1212,7 +1215,7 @@ def handle_owner(chat_id: str, user_id: str, args: str) -> None:
         send_message(chat_id, text, html=True)
         return
     
-    parts = args.split(maxsplit=1)  # only split once so subargs gets everything after subcommand
+    parts = args.split(maxsplit=1)
     subcommand = parts[0].lower()
     subargs = parts[1:] if len(parts) > 1 else []
     
@@ -1279,39 +1282,33 @@ def handle_owner(chat_id: str, user_id: str, args: str) -> None:
             
             # === COSTS & BREAKEVEN ===
             # Railway: ~$5/month (Hobby plan)
-            # OpenAI: ~$0.002 per digest (gpt-4o-mini)
+            # Claude Haiku: ~$0.0004 per digest (900 input + 250 output tokens)
             # Assuming ~30 digests/user/month
-            
+
             railway_cost = 5.00  # USD/month
-            openai_per_digest = 0.002  # USD per digest
+            claude_per_digest = 0.0004  # USD per digest (Haiku pricing)
             digests_per_user_month = 30
-            openai_cost_per_user = openai_per_digest * digests_per_user_month  # ~$0.06/user/month
-            
+            claude_cost_per_user = claude_per_digest * digests_per_user_month  # ~$0.012/user/month
+
             total_users = engagement.get('total_users', 0)
             pro_users = engagement.get('pro_users', 0)
-            
+
             # Revenue: 50 Stars = $1, Telegram takes ~30%, you get ~$0.70
-            # Monthly revenue = pro_users * $0.70
             revenue_per_pro = 0.70  # USD after Telegram fees
             monthly_revenue = pro_users * revenue_per_pro
-            
+
             # Costs
-            estimated_openai_cost = total_users * openai_cost_per_user
-            total_monthly_cost = railway_cost + estimated_openai_cost
-            
-            # Breakeven calculation
-            # Need: total_cost = pro_users * revenue_per_pro
-            # pro_users_needed = total_cost / revenue_per_pro
+            estimated_claude_cost = total_users * claude_cost_per_user
+            total_monthly_cost = railway_cost + estimated_claude_cost
+
             breakeven_pro_users = total_monthly_cost / revenue_per_pro if revenue_per_pro > 0 else 0
-            
-            # Profit/Loss
             profit_loss = monthly_revenue - total_monthly_cost
-            
+
             text += "<b>💰 Costs & Revenue:</b>\n"
             text += f"• Railway: ${railway_cost:.2f}/mo\n"
-            text += f"• OpenAI (est): ${estimated_openai_cost:.2f}/mo\n"
+            text += f"• Claude AI (est): ${estimated_claude_cost:.2f}/mo\n"
             text += f"• <b>Total cost: ${total_monthly_cost:.2f}/mo</b>\n\n"
-            
+
             text += f"• Revenue: ${monthly_revenue:.2f}/mo ({pro_users} Pro)\n"
             if profit_loss >= 0:
                 text += f"• ✅ Profit: <b>${profit_loss:.2f}/mo</b>\n\n"

@@ -1,7 +1,7 @@
 """
 AI Summarizer Module for Substack Digest Bot
 
-Uses OpenAI API to generate summaries in various formats.
+Uses Anthropic Claude API to generate summaries in various formats.
 Supports custom user formats and includes fact-checking.
 
 Default Format - SCQR Framework:
@@ -17,13 +17,16 @@ import requests
 from typing import Optional
 import re
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-OPENAI_API_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_API_KEY = os.environ.get("OPENAI_API_KEY")  # env var name kept for Railway compatibility
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 
 # Model configuration
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
-MAX_TOKENS = 1200  # Generous limit for comprehensive CEO-level analysis
+MAX_TOKENS = 1200
 TEMPERATURE = 0.3
+
+# Minimum content length to attempt summarisation
+MIN_CONTENT_LENGTH = 50
 
 # Built-in summary formats
 SUMMARY_FORMATS = {
@@ -203,6 +206,48 @@ def get_available_formats() -> dict:
     }
 
 
+def _call_api(system_msg: Optional[str], user_msg: str, max_tokens: int) -> Optional[str]:
+    """
+    Make a single Anthropic API call. Returns response text or None on failure.
+    Centralises all request/response logic so each generate_* function
+    doesn't repeat boilerplate.
+    """
+    if not ANTHROPIC_API_KEY:
+        return None
+
+    body = {
+        "model": DEFAULT_MODEL,
+        "messages": [{"role": "user", "content": user_msg}],
+        "max_tokens": max_tokens,
+        "temperature": TEMPERATURE,
+    }
+    if system_msg:
+        body["system"] = system_msg
+
+    try:
+        response = requests.post(
+            ANTHROPIC_API_URL,
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+            json=body,
+            timeout=30,
+        )
+
+        if response.status_code != 200:
+            print(f"Anthropic API error: {response.status_code} - {response.text}")
+            return None
+
+        data = response.json()
+        return data["content"][0]["text"].strip()
+
+    except (requests.RequestException, KeyError, IndexError) as e:
+        print(f"API call error: {e}")
+        return None
+
+
 def generate_summary(
     title: str,
     content: str,
@@ -212,86 +257,60 @@ def generate_summary(
 ) -> Optional[dict]:
     """
     Generate a summary for an article in the specified format.
-    
-    Args:
-        title: Article title
-        content: Article content/summary from RSS
-        feed_name: Name of the source feed
-        format_type: One of the built-in formats or "custom"
-        custom_prompt: User's custom prompt (if format_type is "custom")
-    
-    Returns:
-        Dict with summary fields or None if generation fails
+
+    Returns a dict with summary fields, or None if generation fails or
+    the article content is too short to summarise meaningfully.
     """
-    if not OPENAI_API_KEY:
+    if not ANTHROPIC_API_KEY:
         return None
-    
-    # Clean and truncate content
+
+    # Clean content first, then check length
     content = clean_html(content)
+    if len(content) < MIN_CONTENT_LENGTH:
+        return None  # Not enough content to summarise
+
     if len(content) > 2500:
         content = content[:2500] + "..."
-    
-    # Get the appropriate prompt
+
+    # Build prompt and system message
     if custom_prompt:
-        prompt = custom_prompt.format(
-            title=title,
-            feed_name=feed_name,
-            content=content
+        prompt = custom_prompt.format(title=title, feed_name=feed_name, content=content)
+        system_msg = (
+            "You are an expert at analyzing articles. Always respond with valid JSON only. "
+            "Only include information that is directly stated in or clearly supported by the "
+            "provided article content - do not add external information or assumptions."
         )
-        system_msg = "You are an expert at analyzing articles. Always respond with valid JSON only. Only include information that is directly stated in or clearly supported by the provided article content - do not add external information or assumptions."
     elif format_type in SUMMARY_FORMATS:
         prompt = SUMMARY_FORMATS[format_type]["prompt"].format(
-            title=title,
-            feed_name=feed_name,
-            content=content
+            title=title, feed_name=feed_name, content=content
         )
-        system_msg = "You are an expert at analyzing articles and extracting key insights. Always respond with valid JSON only. CRITICAL: Only include facts and claims that are directly stated in the article - never add external information, assumptions, or inferences beyond what's written."
+        system_msg = (
+            "You are an expert at analyzing articles and extracting key insights. "
+            "Always respond with valid JSON only. CRITICAL: Only include facts and claims "
+            "that are directly stated in the article - never add external information, "
+            "assumptions, or inferences beyond what's written."
+        )
     else:
-        # Default to SCQR
         prompt = SUMMARY_FORMATS["scqr"]["prompt"].format(
-            title=title,
-            feed_name=feed_name,
-            content=content
+            title=title, feed_name=feed_name, content=content
         )
-        system_msg = "You are an expert at analyzing articles and extracting key insights. Always respond with valid JSON only. Only include information directly from the article."
-    
+        system_msg = (
+            "You are an expert at analyzing articles and extracting key insights. "
+            "Always respond with valid JSON only. Only include information directly from the article."
+        )
+
+    raw = _call_api(system_msg, prompt, MAX_TOKENS)
+    if not raw:
+        return None
+
+    # Strip markdown code fences if present
+    raw = re.sub(r'^```(?:json)?\n?', '', raw)
+    raw = re.sub(r'\n?```$', '', raw)
+
     try:
-        response = requests.post(
-            OPENAI_API_URL,
-            headers={
-                "x-api-key": OPENAI_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": DEFAULT_MODEL,
-                "system": system_msg,
-                "messages": [
-                    {"role": "user", "content": prompt},
-                ],
-                "max_tokens": MAX_TOKENS,
-                "temperature": TEMPERATURE,
-            },
-            timeout=30,
-        )
-        
-        if response.status_code != 200:
-            print(f"OpenAI API error: {response.status_code} - {response.text}")
-            return None
-        
-        data = response.json()
-        response_content = data["content"][0]["text"].strip()
-        
-        # Parse JSON from response
-        if response_content.startswith("```"):
-            response_content = re.sub(r'^```(?:json)?\n?', '', response_content)
-            response_content = re.sub(r'\n?```$', '', response_content)
-        
-        summary = json.loads(response_content)
-        return summary
-        
-    except (requests.RequestException, json.JSONDecodeError, KeyError) as e:
-        print(f"Error generating summary: {e}")
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"JSON parse error in generate_summary: {e}")
         return None
 
 
@@ -300,10 +319,7 @@ def generate_scqr_summary(
     content: str,
     feed_name: str = "",
 ) -> Optional[dict]:
-    """
-    Generate an SCQR-format summary for an article.
-    Wrapper for backwards compatibility.
-    """
+    """Generate an SCQR-format summary. Wrapper for backwards compatibility."""
     return generate_summary(title, content, feed_name, format_type="scqr")
 
 
@@ -315,34 +331,27 @@ def generate_batch_summaries(
 ) -> list[dict]:
     """
     Generate summaries for a batch of articles.
-    
-    Args:
-        articles: List of article dicts with 'title', 'summary', 'feed_name'
-        max_articles: Maximum number of articles to summarize (for cost control)
-        format_type: Summary format to use
-        custom_prompt: Optional custom prompt
-    
-    Returns:
-        Same list with 'scqr' key added to each article
+
+    Adds a 'scqr' key to each article dict (None if generation fails or
+    content is too short).
     """
-    if not OPENAI_API_KEY:
+    if not ANTHROPIC_API_KEY:
         for article in articles:
             article["scqr"] = None
         return articles
-    
-    for i, article in enumerate(articles[:max_articles]):
-        summary = generate_summary(
+
+    for article in articles[:max_articles]:
+        article["scqr"] = generate_summary(
             title=article.get("title", ""),
             content=article.get("summary", ""),
             feed_name=article.get("feed_name", ""),
             format_type=format_type,
             custom_prompt=custom_prompt,
         )
-        article["scqr"] = summary
-    
+
     for article in articles[max_articles:]:
         article["scqr"] = None
-    
+
     return articles
 
 
@@ -351,101 +360,74 @@ def generate_quick_summary(title: str, content: str) -> Optional[str]:
     Generate a quick one-paragraph summary (non-SCQR format).
     Useful for free tier users or fallback.
     """
-    if not OPENAI_API_KEY:
-        return None
-    
     content = clean_html(content)
+    if len(content) < MIN_CONTENT_LENGTH:
+        return None
+
     if len(content) > 1500:
         content = content[:1500] + "..."
-    
-    prompt = f"""Summarize this article in 2-3 sentences, focusing on the key insight or takeaway.
 
-IMPORTANT: Only include information that is DIRECTLY stated in the article below. Do not add external knowledge.
+    prompt = (
+        f"Summarize this article in 2-3 sentences, focusing on the key insight or takeaway.\n\n"
+        f"IMPORTANT: Only include information that is DIRECTLY stated in the article below. "
+        f"Do not add external knowledge.\n\n"
+        f"Title: {title}\nContent: {content}\n\nSummary:"
+    )
 
-Title: {title}
-Content: {content}
-
-Summary:"""
-
-    try:
-        response = requests.post(
-            OPENAI_API_URL,
-            headers={
-                "x-api-key": OPENAI_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": DEFAULT_MODEL,
-                "messages": [
-                    {"role": "user", "content": prompt},
-                ],
-                "max_tokens": 200,
-                "temperature": 0.3,
-            },
-            timeout=20,
-        )
-
-        if response.status_code == 200:
-            data = response.json()
-            return data["content"][0]["text"].strip()  # fix response parsing too
-        
-    except (requests.RequestException, KeyError) as e:
-        print(f"Error generating quick summary: {e}")
-        return None
+    return _call_api(None, prompt, 200)
 
 
 def clean_html(text: str) -> str:
-    """Remove HTML tags and clean up text."""
+    """Remove HTML tags (including malformed/truncated ones) and clean up text."""
+    # >? makes the closing bracket optional so truncated tags like </div are caught
     clean = re.sub(r'<[^>]*>?', '', text)
     clean = ' '.join(clean.split())
-    clean = clean.replace('&amp;', '&')
-    clean = clean.replace('&lt;', '<')
-    clean = clean.replace('&gt;', '>')
-    clean = clean.replace('&quot;', '"')
-    clean = clean.replace('&#39;', "'")
-    clean = clean.replace('&nbsp;', ' ')
+    clean = (
+        clean
+        .replace('&amp;', '&')
+        .replace('&lt;', '<')
+        .replace('&gt;', '>')
+        .replace('&quot;', '"')
+        .replace('&#39;', "'")
+        .replace('&nbsp;', ' ')
+    )
     return clean.strip()
 
 
 def validate_custom_prompt(prompt: str) -> tuple[bool, str]:
     """
-    Validate a custom prompt.
-    
-    Returns:
-        (is_valid, error_message_or_prompt)
+    Validate and normalise a custom prompt.
+
+    Returns (is_valid, normalised_prompt_or_error_message).
     """
     if not prompt or len(prompt.strip()) < 20:
         return False, "Prompt is too short. Please provide more detail."
-    
+
     if len(prompt) > 1000:
         return False, "Prompt is too long. Keep it under 1000 characters."
-    
-    # Check for required placeholders
+
     if "{content}" not in prompt:
         prompt += "\n\nArticle Content: {content}"
-    
-    # Ensure JSON response is requested
+
     if "json" not in prompt.lower():
         prompt += "\n\nRespond with valid JSON only."
-    
+
     return True, prompt
 
 
 def estimate_api_cost(num_articles: int) -> dict:
-    """
-    Estimate OpenAI API cost for summarizing articles.
-    """
+    """Estimate Anthropic API cost for summarising articles (Claude Haiku pricing)."""
     avg_input_tokens = 900
     avg_output_tokens = 250
-    
+
     total_input = num_articles * avg_input_tokens
     total_output = num_articles * avg_output_tokens
-    
-    input_cost = (total_input / 1_000_000) * 0.15
-    output_cost = (total_output / 1_000_000) * 0.60
+
+    # Claude Haiku: $0.80/M input, $4/M output (as of 2025)
+    input_cost = (total_input / 1_000_000) * 0.80
+    output_cost = (total_output / 1_000_000) * 4.00
     total_cost = input_cost + output_cost
-    
+
     return {
         "num_articles": num_articles,
         "estimated_input_tokens": total_input,
