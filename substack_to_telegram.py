@@ -1208,7 +1208,7 @@ def handle_owner(chat_id: str, user_id: str, args: str) -> None:
         send_message(chat_id, text, html=True)
         return
     
-    parts = args.split(maxsplit=2)
+    parts = args.split(maxsplit=1)  # only split once so subargs gets everything after subcommand
     subcommand = parts[0].lower()
     subargs = parts[1:] if len(parts) > 1 else []
     
