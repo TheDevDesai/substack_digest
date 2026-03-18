@@ -18,10 +18,10 @@ from typing import Optional
 import re
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+OPENAI_API_URL = "https://api.anthropic.com/v1/messages"
 
 # Model configuration
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 MAX_TOKENS = 1200  # Generous limit for comprehensive CEO-level analysis
 TEMPERATURE = 0.3
 
@@ -259,17 +259,16 @@ def generate_summary(
         response = requests.post(
             OPENAI_API_URL,
             headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "x-api-key": OPENAI_API_KEY,
+                "anthropic-version": "2023-06-01",
                 "Content-Type": "application/json",
             },
             json={
                 "model": DEFAULT_MODEL,
+                "system": system_msg,        # top-level field, not a message role
                 "messages": [
-                    {"role": "system", "content": system_msg},
                     {"role": "user", "content": prompt},
                 ],
-                "max_tokens": MAX_TOKENS,
-                "temperature": TEMPERATURE,
             },
             timeout=30,
         )
@@ -279,7 +278,7 @@ def generate_summary(
             return None
         
         data = response.json()
-        response_content = data["choices"][0]["message"]["content"].strip()
+        response_content = data["content"][0]["text"].strip()
         
         # Parse JSON from response
         if response_content.startswith("```"):
